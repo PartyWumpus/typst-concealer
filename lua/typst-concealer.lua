@@ -1,8 +1,12 @@
 local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
 
+local is_tmux = vim.env.TMUX ~= nil
+
 local typst_prelude = "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n#set text(white)\n"
 
 local stdout = vim.loop.new_tty(1, false)
+
+local pid = vim.fn.getpid()
 
 local counter = 1
 
@@ -312,6 +316,19 @@ local codes = {
 
 local ns_id = vim.api.nvim_create_namespace("typst")
 
+-- Thanks image.nvim
+local tmux_escape = function(sequence)
+  return "\x1bPtmux;" .. sequence:gsub("\x1b", "\x1b\x1b") .. "\x1b\\"
+end
+
+local function send_kitty_escape(message)
+  if is_tmux then
+    stdout:write(tmux_escape("\x1b_G" .. message .. "\x1b\\"))
+  else
+    stdout:write("\x1b_G" .. message .. "\x1b\\")
+  end
+end
+
 -- Thanks https://github.com/3rd/image.nvim/issues/259
 local function render_image(image_id, range)
   -- { start_row, start_col, end_row, end_col }
@@ -326,7 +343,7 @@ local function render_image(image_id, range)
     y = range[1]
     x = 0
   end
-  stdout:write("\x1b_G" .. "q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height .. "\x1b\\")
+  send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
 
   local hl_group = "image-nvim-image-id-" .. tostring(image_id)
   -- encode image_id into the foreground color
@@ -356,8 +373,11 @@ end
 
 local function create_image(path, id)
   local path = vim.base64.encode(path)
-  local x = "\x1b_G" .. "q=2,f=100,t=f,i=" .. id .. ";" .. path .. "\x1b\\"
-  stdout:write(x)
+  send_kitty_escape("q=2,f=100,t=f,i=" .. id .. ";" .. path)
+end
+
+local function id_to_path(id, bufnr)
+  return "/tmp/typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
 end
 
 local function render_file()
@@ -374,7 +394,7 @@ local function render_file()
     local str = range_to_string(start_row, start_col, end_row, end_col)
     local id = counter
     counter = counter + 1
-    local path = "/tmp/typst-concealer-" .. bufnr .. "-" .. id .. ".png"
+    local path = id_to_path(id, bufnr)
     local handle = io.popen("typst compile - " .. path, "w")
     handle:write(typst_prelude .. str)
     handle:close()
@@ -383,7 +403,7 @@ local function render_file()
   end
 
   for id, range in pairs(rows) do
-    local path = "/tmp/typst-concealer-" .. bufnr .. "-" .. id .. ".png"
+    local path = id_to_path(id, bufnr)
     create_image(path, id)
     render_image(id, range)
   end
@@ -392,10 +412,14 @@ end
 
 
 local function setup()
+  if vim.fn.executable('typst') ~= 1 then
+    error("Typst executable not found in path, typst-concealer likely will not work")
+  end
   vim.api.nvim_create_autocmd("BufEnter",
     { pattern = "*.typ", group = augroup, desc = "typst-concealer render file on enter", callback = render_file })
   vim.api.nvim_create_autocmd("BufWritePost",
     { pattern = "*.typ", group = augroup, desc = "typst-concealer render file on save", callback = render_file })
+
   vim.keymap.set("n", "<leader>tt", render_file, { desc = "[typst-concealer] re-render" })
   vim.keymap.set("n", "<leader>tr", function()
     vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
