@@ -1,12 +1,12 @@
 local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
 
--- typst compile tmp.typ -f png
 local typst_prelude = "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n#set text(white)\n"
 
 local stdout = vim.loop.new_tty(1, false)
 
 local counter = 1
 
+-- thanks neorg :)
 local codes = {
   placeholder = "\u{0010EEEE}",
   diacritics = {
@@ -310,17 +310,24 @@ local codes = {
   },
 }
 
-local function parse_matches(match, pattern, predicate, metadata)
-
-end
-
 local ns_id = vim.api.nvim_create_namespace("typst")
 
 -- Thanks https://github.com/3rd/image.nvim/issues/259
-local function render_image(image_id, x, y, width, height)
+local function render_image(image_id, range)
+  -- { start_row, start_col, end_row, end_col }
+  local height = range[3] - range[1] + 1
+  local width, y, x
+  if height == 1 then
+    width = range[4] - range[2]
+    y = range[1]
+    x = range[2]
+  else
+    width = 45
+    y = range[1]
+    x = 0
+  end
   stdout:write("\x1b_G" .. "q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height .. "\x1b\\")
 
-  local virt_lines = {}
   local hl_group = "image-nvim-image-id-" .. tostring(image_id)
   -- encode image_id into the foreground color
   vim.api.nvim_set_hl(0, hl_group, { fg = string.format("#%06X", image_id) })
@@ -329,18 +336,21 @@ local function render_image(image_id, x, y, width, height)
     for j = 0, width - 1 do
       line = line .. codes.placeholder .. codes.diacritics[i + 1] .. codes.diacritics[j + 1]
     end
-    table.insert(virt_lines, { { line, hl_group } })
+    vim.api.nvim_buf_set_extmark(0, ns_id, y + i, x, {
+      virt_text = { { line, hl_group } },
+      virt_text_pos = "overlay"
+    })
   end
-  vim.api.nvim_buf_set_extmark(0, ns_id, y, x, {
-    virt_lines = virt_lines,
-    virt_lines_above = false,
-  })
 end
 
 local function range_to_string(start_row, start_col, end_row, end_col)
   local content = vim.api.nvim_buf_get_lines(0, start_row, end_row + 1, false)
-  content[1] = string.sub(content[1], start_col + 1)
-  content[#content] = string.sub(content[#content], 0, end_col)
+  if start_row == end_row then
+    content[1] = string.sub(content[1], start_col + 1, end_col)
+  else
+    content[1] = string.sub(content[1], start_col + 1)
+    content[#content] = string.sub(content[#content], 0, end_col)
+  end
   return table.concat(content, "\n")
 end
 
@@ -350,7 +360,7 @@ local function create_image(path, id)
   stdout:write(x)
 end
 
-local function main()
+local function render_file()
   vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
   local bufnr = vim.fn.bufnr()
   local parser = vim.treesitter.get_parser(bufnr)
@@ -364,7 +374,7 @@ local function main()
     local str = range_to_string(start_row, start_col, end_row, end_col)
     local id = counter
     counter = counter + 1
-    local path = "/tmp/typst-nvim-" .. id .. ".png"
+    local path = "/tmp/typst-concealer-" .. bufnr .. "-" .. id .. ".png"
     local handle = io.popen("typst compile - " .. path, "w")
     handle:write(typst_prelude .. str)
     handle:close()
@@ -372,16 +382,10 @@ local function main()
     rows[id] = { start_row, start_col, end_row, end_col }
   end
 
-  --os.execute("sleep " .. tonumber(0.5))
-
   for id, range in pairs(rows) do
-    local width = 60
-    --local height = end_row - start_row + 1
-    local height = range[3] - range[1] + 1
-    local path = "/tmp/typst-nvim-" .. id .. ".png"
+    local path = "/tmp/typst-concealer-" .. bufnr .. "-" .. id .. ".png"
     create_image(path, id)
-    -- render_image(id, 0, end_row, width, height)
-    render_image(id, 0, range[3], width, height)
+    render_image(id, range)
   end
 end
 
@@ -389,9 +393,13 @@ end
 
 local function setup()
   vim.api.nvim_create_autocmd("BufEnter",
-    { pattern = "*.typ", group = augroup, desc = "Do typst rendering shit", callback = main })
+    { pattern = "*.typ", group = augroup, desc = "typst-concealer render file on enter", callback = render_file })
   vim.api.nvim_create_autocmd("BufWritePost",
-    { pattern = "*.typ", group = augroup, desc = "Do typst rendering shit", callback = main })
+    { pattern = "*.typ", group = augroup, desc = "typst-concealer render file on save", callback = render_file })
+  vim.keymap.set("n", "<leader>tt", render_file, { desc = "[typst-concealer] re-render" })
+  vim.keymap.set("n", "<leader>tr", function()
+    vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+  end, { desc = "[typst-concealer] clear" })
 end
 
 return { setup = setup }
