@@ -1,4 +1,5 @@
-local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
+--- @class typstconcealer
+local M = {}
 
 local is_tmux = vim.env.TMUX ~= nil
 
@@ -314,13 +315,29 @@ local codes = {
   },
 }
 
+--- Takes in a value, and if it is nil, return the provided default
+--- @generic T
+--- @param val T?
+--- @param default_val T
+--- @return T
+local function default(val, default_val)
+  if val == nil then return default_val end
+  return val
+end
+
 local ns_id = vim.api.nvim_create_namespace("typst")
 
 -- Thanks image.nvim
-local tmux_escape = function(sequence)
-  return "\x1bPtmux;" .. sequence:gsub("\x1b", "\x1b\x1b") .. "\x1b\\"
+
+--- Escapes a given escape sequence so tmux will pass it through
+--- @param message string
+--- @return string
+local tmux_escape = function(message)
+  return "\x1bPtmux;" .. message:gsub("\x1b", "\x1b\x1b") .. "\x1b\\"
 end
 
+--- Sends a kitty graphics message, adding the APC escape code stuff
+--- @param message string
 local function send_kitty_escape(message)
   if is_tmux then
     stdout:write(tmux_escape("\x1b_G" .. message .. "\x1b\\"))
@@ -329,18 +346,22 @@ local function send_kitty_escape(message)
   end
 end
 
--- Thanks https://github.com/3rd/image.nvim/issues/259
+-- Thanks https://github.com/3rd/image.nvim/issues/259 for showing how to do this with a code example!
+
+--- Places the unicode characters to render a given image id over a range
+--- @param image_id integer
+--- @param range Range4
 local function render_image(image_id, range)
-  -- { start_row, start_col, end_row, end_col }
-  local height = range[3] - range[1] + 1
+  local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
+  local height = end_row - start_row + 1
   local width, y, x
   if height == 1 then
-    width = range[4] - range[2]
-    y = range[1]
-    x = range[2]
+    width = end_col - start_col
+    y = start_row
+    x = start_col
   else
-    width = 45
-    y = range[1]
+    width = 45 -- TODO: do this better
+    y = start_row
     x = 0
   end
   send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
@@ -355,13 +376,19 @@ local function render_image(image_id, range)
     end
     vim.api.nvim_buf_set_extmark(0, ns_id, y + i, x, {
       virt_text = { { line, hl_group } },
-      virt_text_pos = "overlay"
+      virt_text_pos = "overlay",
+      invalidate = true,
     })
   end
 end
 
-local function range_to_string(start_row, start_col, end_row, end_col)
-  local content = vim.api.nvim_buf_get_lines(0, start_row, end_row + 1, false)
+--- Takes in a range and returns the string contained within that range
+--- @param range Range4
+--- @param bufnr integer
+--- @return string
+local function range_to_string(range, bufnr)
+  local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
+  local content = vim.api.nvim_buf_get_lines(bufnr, start_row, end_row + 1, false)
   if start_row == end_row then
     content[1] = string.sub(content[1], start_col + 1, end_col)
   else
@@ -371,18 +398,26 @@ local function range_to_string(start_row, start_col, end_row, end_col)
   return table.concat(content, "\n")
 end
 
+--- Tells terminal to read the image and link image id -> image
+--- @param path string
+--- @param id integer
 local function create_image(path, id)
-  local path = vim.base64.encode(path)
+  path = vim.base64.encode(path)
   send_kitty_escape("q=2,f=100,t=f,i=" .. id .. ";" .. path)
 end
 
-local function id_to_path(id, bufnr)
+--- Generates a filename for a given image id and buffer
+--- @param id integer
+--- @param bufnr integer
+--- @return string
+local function typst_file_path(id, bufnr)
   return "/tmp/typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
 end
 
-local function render_file()
+--- @param buf? integer Which buffer to render, defaulting to current buffer
+local function render_buf(buf)
   vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
-  local bufnr = vim.fn.bufnr()
+  local bufnr = default(buf, vim.fn.bufnr())
   local parser = vim.treesitter.get_parser(bufnr)
   local tree = parser:parse({})
 
@@ -391,10 +426,10 @@ local function render_file()
   local query = vim.treesitter.query.parse("typst", "(math) @math")
   for _, node in query:iter_captures(tree[1]:root()) do
     local start_row, start_col, end_row, end_col = node:range()
-    local str = range_to_string(start_row, start_col, end_row, end_col)
+    local str = range_to_string({ start_row, start_col, end_row, end_col }, bufnr)
     local id = counter
     counter = counter + 1
-    local path = id_to_path(id, bufnr)
+    local path = typst_file_path(id, bufnr)
     local handle = io.popen("typst compile - " .. path, "w")
     handle:write(typst_prelude .. str)
     handle:close()
@@ -403,27 +438,63 @@ local function render_file()
   end
 
   for id, range in pairs(rows) do
-    local path = id_to_path(id, bufnr)
+    local path = typst_file_path(id, bufnr)
     create_image(path, id)
     render_image(id, range)
   end
 end
 
+--- @class typstconfig
+--- @field render_on_enter? boolean Should typst-concealer render all typst blocks when a file is first entered?
+--- @field rerender_on_save? boolean Should typst-concealer rerender all typst blocks when a file is saved?
+--- @field allow_missing_typst? boolean Allow the plugin to load without the typst binary in the path
 
+local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
 
-local function setup()
-  if vim.fn.executable('typst') ~= 1 then
-    error("Typst executable not found in path, typst-concealer likely will not work")
+--- Initializes typst-concealer
+--- @param cfg typstconfig
+--- @see typstconfig
+function M.setup(cfg)
+  cfg = {
+    render_on_enter = default(cfg.render_on_enter, true),
+    rerender_on_save = default(cfg.rerender_on_save, true),
+    allow_missing_typst = default(cfg.allow_missing_typst, false),
+  }
+
+  if not cfg.allow_missing_typst and vim.fn.executable('typst') ~= 1 then
+    error("Typst executable not found in path, typst-concealer will not work")
   end
-  vim.api.nvim_create_autocmd("BufEnter",
-    { pattern = "*.typ", group = augroup, desc = "typst-concealer render file on enter", callback = render_file })
-  vim.api.nvim_create_autocmd("BufWritePost",
-    { pattern = "*.typ", group = augroup, desc = "typst-concealer render file on save", callback = render_file })
 
-  vim.keymap.set("n", "<leader>tt", render_file, { desc = "[typst-concealer] re-render" })
+
+  if cfg.render_on_enter then
+    vim.api.nvim_create_autocmd("BufEnter",
+      {
+        pattern = "*.typ",
+        group = augroup,
+        desc = "typst-concealer render file on enter",
+        callback = function()
+          render_buf()
+        end
+      })
+  end
+
+  if cfg.rerender_on_save then
+    vim.api.nvim_create_autocmd("BufWritePost",
+      {
+        pattern = "*.typ",
+        group = augroup,
+        desc = "typst-concealer render file on enter",
+        callback = function()
+          render_buf()
+        end
+      })
+  end
+
+
+  vim.keymap.set("n", "<leader>tt", render_buf, { desc = "[typst-concealer] re-render" })
   vim.keymap.set("n", "<leader>tr", function()
     vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
   end, { desc = "[typst-concealer] clear" })
 end
 
-return { setup = setup }
+return M
