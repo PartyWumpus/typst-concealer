@@ -5,10 +5,6 @@ local is_tmux = vim.env.TMUX ~= nil
 
 local typst_prelude = "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n#set text(white)\n"
 
-local stdout = vim.loop.new_tty(1, false)
-
-local pid = vim.fn.getpid()
-
 local counter = 1
 
 -- thanks neorg :)
@@ -327,15 +323,15 @@ end
 
 local ns_id = vim.api.nvim_create_namespace("typst")
 
--- Thanks image.nvim
-
 --- Escapes a given escape sequence so tmux will pass it through
 --- @param message string
 --- @return string
 local tmux_escape = function(message)
+  -- Thanks image.nvim
   return "\x1bPtmux;" .. message:gsub("\x1b", "\x1b\x1b") .. "\x1b\\"
 end
 
+local stdout = vim.loop.new_tty(1, false)
 --- Sends a kitty graphics message, adding the APC escape code stuff
 --- @param message string
 local function send_kitty_escape(message)
@@ -406,12 +402,31 @@ local function create_image(path, id)
   send_kitty_escape("q=2,f=100,t=f,i=" .. id .. ";" .. path)
 end
 
+
+local pid = vim.fn.getpid()
 --- Generates a filename for a given image id and buffer
 --- @param id integer
 --- @param bufnr integer
 --- @return string
 local function typst_file_path(id, bufnr)
   return "/tmp/typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
+end
+
+-- This assumes we are only ever doing one buffer at a time!
+--- @type { [string]: string }
+local diagnostics = {}
+
+--- For handling errors thrown by the typst executable
+--- @param data string
+--- @param range Range4
+local function handle_typst_error(data, range)
+  -- FIXME: the horrors
+  local str_range = range[1] .. "," .. range[2] .. "," .. range[3] .. "," .. range[4]
+  if diagnostics[str_range] == nil then
+    diagnostics[str_range] = data
+  else
+    diagnostics[str_range] = diagnostics[str_range] .. data
+  end
 end
 
 --- @param buf? integer Which buffer to render, defaulting to current buffer
@@ -423,6 +438,9 @@ local function render_buf(buf)
 
   local rows = {}
 
+  ---@type vim.SystemObj[]
+  local waits = {}
+
   local query = vim.treesitter.query.parse("typst", "(math) @math")
   for _, node in query:iter_captures(tree[1]:root()) do
     local start_row, start_col, end_row, end_col = node:range()
@@ -430,12 +448,43 @@ local function render_buf(buf)
     local id = counter
     counter = counter + 1
     local path = typst_file_path(id, bufnr)
-    local handle = io.popen("typst compile - " .. path, "w")
-    handle:write(typst_prelude .. str)
-    handle:close()
+    --local obj = vim.system({ "typst", "--color=always", "compile", "-", path }, {
+    local obj = vim.system({ "typst", "compile", "-", path }, {
+      stdin = { typst_prelude, str },
+      stderr = function(err, data)
+        if data ~= nil then
+          handle_typst_error(data, { start_row, start_col, end_row, end_col })
+        end
+      end,
+    })
+    table.insert(waits, obj)
 
     rows[id] = { start_row, start_col, end_row, end_col }
   end
+
+  for _, x in ipairs(waits) do
+    x:wait()
+  end
+
+  --- @type vim.Diagnostic[]
+  local new_diagnostics = {}
+  for range, data in pairs(diagnostics) do
+    --- @type Range4 (FIXME: continued horrors)
+    local range = vim.split(range, ",")
+    new_diagnostics[#new_diagnostics + 1] = {
+      bufnr = bufnr,
+      col = tonumber(range[2]),
+      lnum = tonumber(range[1]),
+      message = data,
+      end_col = tonumber(range[4]),
+      end_lnum = tonumber(range[3]),
+      severity = "ERROR",
+      namespace = ns_id,
+      source = "typst-concealer"
+    }
+  end
+  vim.diagnostic.set(ns_id, bufnr, new_diagnostics)
+  diagnostics = {}
 
   for id, range in pairs(rows) do
     local path = typst_file_path(id, bufnr)
