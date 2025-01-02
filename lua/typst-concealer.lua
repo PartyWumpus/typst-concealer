@@ -412,23 +412,6 @@ local function typst_file_path(id, bufnr)
   return "/tmp/typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
 end
 
--- This assumes we are only ever doing one buffer at a time!
---- @type { [string]: string }
-local diagnostics = {}
-
---- For handling errors thrown by the typst executable
---- @param data string
---- @param range Range4
-local function handle_typst_error(data, range)
-  -- FIXME: the horrors
-  local str_range = range[1] .. "," .. range[2] .. "," .. range[3] .. "," .. range[4]
-  if diagnostics[str_range] == nil then
-    diagnostics[str_range] = data
-  else
-    diagnostics[str_range] = diagnostics[str_range] .. data
-  end
-end
-
 --- @param buf? integer Which buffer to render, defaulting to current buffer
 local function render_buf(buf)
   vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
@@ -436,9 +419,10 @@ local function render_buf(buf)
   local parser = vim.treesitter.get_parser(bufnr)
   local tree = parser:parse({})
 
+  --- @type { [integer]: Range4 }
   local rows = {}
 
-  ---@type vim.SystemObj[]
+  ---@type { [integer]: vim.SystemObj }
   local waits = {}
 
   local query = vim.treesitter.query.parse("typst", "(math) @math")
@@ -451,40 +435,48 @@ local function render_buf(buf)
     --local obj = vim.system({ "typst", "--color=always", "compile", "-", path }, {
     local obj = vim.system({ "typst", "compile", "-", path }, {
       stdin = { typst_prelude, str },
-      stderr = function(err, data)
-        if data ~= nil then
-          handle_typst_error(data, { start_row, start_col, end_row, end_col })
-        end
-      end,
+      timeout = 1000,
     })
-    table.insert(waits, obj)
-
+    waits[id] = obj
     rows[id] = { start_row, start_col, end_row, end_col }
   end
 
-  for _, x in ipairs(waits) do
-    x:wait()
-  end
-
   --- @type vim.Diagnostic[]
-  local new_diagnostics = {}
-  for range, data in pairs(diagnostics) do
-    --- @type Range4 (FIXME: continued horrors)
-    local range = vim.split(range, ",")
-    new_diagnostics[#new_diagnostics + 1] = {
-      bufnr = bufnr,
-      col = tonumber(range[2]),
-      lnum = tonumber(range[1]),
-      message = data,
-      end_col = tonumber(range[4]),
-      end_lnum = tonumber(range[3]),
-      severity = "ERROR",
-      namespace = ns_id,
-      source = "typst-concealer"
-    }
+  local diagnostics = {}
+
+  for id, obj in pairs(waits) do
+    local status = obj:wait()
+    if status.code == 124 then
+      local range = rows[id]
+      diagnostics[#diagnostics + 1] = {
+        bufnr = bufnr,
+        lnum = tonumber(range[1]),
+        col = tonumber(range[2]),
+        end_lnum = tonumber(range[3]),
+        end_col = tonumber(range[4]),
+        message = "Typst timed out while trying to compile this (1s)",
+        severity = "WARN",
+        namespace = ns_id,
+        source = "typst-concealer"
+      }
+      rows[id] = nil -- don't render if failed
+    elseif status.stderr ~= "" then
+      local range = rows[id]
+      diagnostics[#diagnostics + 1] = {
+        bufnr = bufnr,
+        lnum = tonumber(range[1]),
+        col = tonumber(range[2]),
+        end_lnum = tonumber(range[3]),
+        end_col = tonumber(range[4]),
+        message = status.stderr,
+        severity = "ERROR",
+        namespace = ns_id,
+        source = "typst-concealer"
+      }
+      rows[id] = nil -- don't render if failed
+    end
   end
-  vim.diagnostic.set(ns_id, bufnr, new_diagnostics)
-  diagnostics = {}
+  vim.diagnostic.set(ns_id, bufnr, diagnostics)
 
   for id, range in pairs(rows) do
     local path = typst_file_path(id, bufnr)
