@@ -350,31 +350,52 @@ end
 local function render_image(image_id, range)
   local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
   local height = end_row - start_row + 1
-  local width, y, x
-  if height == 1 then
-    width = end_col - start_col
-    y = start_row
-    x = start_col
-  else
-    width = 45 -- TODO: do this better
-    y = start_row
-    x = 0
-  end
-  send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
 
-  local hl_group = "image-nvim-image-id-" .. tostring(image_id)
+  local hl_group = "typst-concealer-image-id-" .. tostring(image_id)
   -- encode image_id into the foreground color
   vim.api.nvim_set_hl(0, hl_group, { fg = string.format("#%06X", image_id) })
-  for i = 0, height - 1 do
+
+  if height == 1 then
+    local width = end_col - start_col
+    send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
     local line = ""
     for j = 0, width - 1 do
-      line = line .. codes.placeholder .. codes.diacritics[i + 1] .. codes.diacritics[j + 1]
+      line = line .. codes.placeholder .. codes.diacritics[1] .. codes.diacritics[j + 1]
     end
-    vim.api.nvim_buf_set_extmark(0, ns_id, y + i, x, {
+    vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
       virt_text = { { line, hl_group } },
       virt_text_pos = "overlay",
       invalidate = true,
+      end_col = end_col,
+      end_row = end_row
     })
+  else
+    local width = 45 -- TODO: do this better
+    send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
+    --local lines = {}
+    for i = 0, height - 1 do
+      local line = ""
+      for j = 0, width - 1 do
+        line = line .. codes.placeholder .. codes.diacritics[i + 1] .. codes.diacritics[j + 1]
+      end
+      --table.insert(lines, { line, hl_group })
+      -- FIXME: silly
+      vim.api.nvim_buf_set_extmark(0, ns_id, start_row + i, start_col, {
+        virt_text = { { line, hl_group } },
+        virt_text_pos = "overlay",
+        invalidate = true,
+        end_col = end_col,
+        end_row = start_row
+      })
+    end
+    --[[vim.api.nvim_buf_set_extmark(0, ns_id, start_row, 0, {
+      virt_text = lines,
+      virt_text_repeat_linebreak = true,
+      virt_text_pos = "overlay",
+      end_row = end_row,
+      end_col = end_col,
+      invalidate = true,
+    })]] --
   end
 end
 
@@ -412,10 +433,10 @@ local function typst_file_path(id, bufnr)
   return "/tmp/typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
 end
 
---- @param buf? integer Which buffer to render, defaulting to current buffer
-local function render_buf(buf)
+--- @param bufnr? integer Which buffer to render, defaulting to current buffer
+local function render_buf(bufnr)
   vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
-  local bufnr = default(buf, vim.fn.bufnr())
+  bufnr = default(bufnr, vim.fn.bufnr())
   local parser = vim.treesitter.get_parser(bufnr)
   local tree = parser:parse({})
 
@@ -485,6 +506,86 @@ local function render_buf(buf)
   end
 end
 
+local prev_hidden_extmark_id = nil
+
+local function show_hidden_extmark()
+  if prev_hidden_extmark_id == nil then
+    return
+  end
+  local bufnr = vim.fn.bufnr()
+  local m = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, prev_hidden_extmark_id, { details = true })
+  local row, col, opts = m[1], m[2], m[3]
+  vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
+    id = prev_hidden_extmark_id,
+    virt_text_pos = "overlay",
+
+    end_row = opts.end_row,
+    end_col = opts.end_col,
+    priority = opts.priority,
+    hl_group = opts.hl_group,
+    --- @diagnostic disable-next-line:assign-type-mismatch bug in core
+    end_right_gravity = opts.end_right_gravity,
+    right_gravity = opts.right_gravity,
+    hl_eol = opts.hl_eol,
+    virt_text = opts.virt_text,
+    virt_text_hide = opts.virt_text_hide,
+    virt_text_repeat_linebreak = opts.virt_text_repeat_linebreak,
+    virt_text_win_col = opts.virt_text_win_col,
+    hl_mode = opts.hl_mode,
+    line_hl_group = opts.line_hl_group,
+    spell = opts.spell,
+    --- @diagnostic disable-next-line:assign-type-mismatch fixed in 0.11
+    url = opts.url,
+  })
+  prev_hidden_extmark_id = nil
+end
+
+local function hide_extmark_at_cursor()
+  local bufnr = vim.fn.bufnr()
+  local cursor_pos = vim.api.nvim_win_get_cursor(0)
+  cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] }
+  local extmark = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, cursor_pos, cursor_pos, {
+    overlap = true,
+    limit = 1,
+    details = true
+  })[1]
+
+  if extmark == nil and prev_hidden_extmark_id ~= nil then
+    show_hidden_extmark()
+  end
+
+  if extmark ~= nil and extmark[1] ~= prev_hidden_extmark_id then
+    --- @type integer, integer, integer, vim.api.keyset.extmark_details
+    local id, row, col, opts = extmark[1], extmark[2], extmark[3], extmark[4]
+    vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
+      id = id,
+      virt_text_pos = "eol",
+
+      end_row = opts.end_row,
+      end_col = opts.end_col,
+      priority = opts.priority,
+      hl_group = opts.hl_group,
+      --- @diagnostic disable-next-line:assign-type-mismatch bug in core
+      end_right_gravity = opts.end_right_gravity,
+      right_gravity = opts.right_gravity,
+      hl_eol = opts.hl_eol,
+      virt_text = opts.virt_text,
+      virt_text_hide = opts.virt_text_hide,
+      virt_text_repeat_linebreak = opts.virt_text_repeat_linebreak,
+      virt_text_win_col = opts.virt_text_win_col,
+      hl_mode = opts.hl_mode,
+      line_hl_group = opts.line_hl_group,
+      spell = opts.spell,
+      --- @diagnostic disable-next-line:assign-type-mismatch fixed in 0.11
+      url = opts.url,
+    })
+    if extmark[1] ~= prev_hidden_extmark_id then
+      show_hidden_extmark()
+    end
+    prev_hidden_extmark_id = id
+  end
+end
+
 --- @class typstconfig
 --- @field render_on_enter? boolean Should typst-concealer render all typst blocks when a file is first entered?
 --- @field rerender_on_save? boolean Should typst-concealer rerender all typst blocks when a file is saved?
@@ -530,6 +631,47 @@ function M.setup(cfg)
         end
       })
   end
+
+  vim.api.nvim_create_autocmd("CursorMovedI",
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer render file on enter",
+      callback = function()
+        hide_extmark_at_cursor()
+      end
+    })
+
+  vim.api.nvim_create_autocmd("InsertLeave",
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer render file on enter",
+      callback = function()
+        show_hidden_extmark()
+      end
+    })
+
+  vim.api.nvim_create_autocmd("InsertEnter",
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer render file on enter",
+      callback = function()
+        hide_extmark_at_cursor()
+      end
+    })
+
+  -- TODO: make this only rerender the thing being worked on (or do nothing, if no block is selected)
+  --[[vim.api.nvim_create_autocmd("CursorMovedI",
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer render file on enter",
+      callback = function()
+        render_buf()
+      end
+    })]] --
 
 
   vim.keymap.set("n", "<leader>tt", render_buf, { desc = "[typst-concealer] re-render" })

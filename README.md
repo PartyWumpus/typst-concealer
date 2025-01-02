@@ -11,6 +11,7 @@ Lazy.nvim: `{ 'PartyWumpus/typst-concealer', config = function() require('typst-
 
 ## Known issues
 - It doesn't actually hide the text beneath images properly, so sometimes it's visible
-- It doesn't unconceal stuff when it is being edited with insert mode
+- Multiline typst things are unhidden terribly in insert mode
 - Mulitline typst things are just rendered at a fixed length of 75 characters, which is perhaps a little silly
+- Doesn't render #images, even though it could
 - It is weird
