@@ -331,15 +331,31 @@ local tmux_escape = function(message)
   return "\x1bPtmux;" .. message:gsub("\x1b", "\x1b\x1b") .. "\x1b\\"
 end
 
-local stdout = vim.loop.new_tty(1, false)
+local vim_stdout = vim.loop.new_tty(1, false)
 --- Sends a kitty graphics message, adding the APC escape code stuff
 --- @param message string
 local function send_kitty_escape(message)
   if is_tmux then
-    stdout:write(tmux_escape("\x1b_G" .. message .. "\x1b\\"))
+    vim_stdout:write(tmux_escape("\x1b_G" .. message .. "\x1b\\"))
   else
-    stdout:write("\x1b_G" .. message .. "\x1b\\")
+    vim_stdout:write("\x1b_G" .. message .. "\x1b\\")
   end
+end
+
+---@param range Range4
+---@return integer width
+---@return integer height
+local function range_to_dimensions(range)
+  local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
+  local height = end_row - start_row + 1
+  local width = 0
+  if height == 1 then
+    width = end_col - start_col
+  else
+    -- FIXME: don't just hardcode this
+    width = 45
+  end
+  return width, height
 end
 
 -- Thanks https://github.com/3rd/image.nvim/issues/259 for showing how to do this with a code example!
@@ -349,15 +365,13 @@ end
 --- @param range Range4
 local function render_image(image_id, range)
   local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
-  local height = end_row - start_row + 1
+  local width, height = range_to_dimensions(range)
 
   local hl_group = "typst-concealer-image-id-" .. tostring(image_id)
   -- encode image_id into the foreground color
   vim.api.nvim_set_hl(0, hl_group, { fg = string.format("#%06X", image_id) })
 
   if height == 1 then
-    local width = end_col - start_col
-    send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
     local line = ""
     for j = 0, width - 1 do
       line = line .. codes.placeholder .. codes.diacritics[1] .. codes.diacritics[j + 1]
@@ -370,8 +384,6 @@ local function render_image(image_id, range)
       end_row = end_row
     })
   else
-    local width = 45 -- TODO: do this better
-    send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
     --local lines = {}
     for i = 0, height - 1 do
       local line = ""
@@ -385,7 +397,7 @@ local function render_image(image_id, range)
         virt_text_pos = "overlay",
         invalidate = true,
         end_col = end_col,
-        end_row = start_row
+        end_row = start_row + i
       })
     end
     --[[vim.api.nvim_buf_set_extmark(0, ns_id, start_row, 0, {
@@ -417,10 +429,15 @@ end
 
 --- Tells terminal to read the image and link image id -> image
 --- @param path string
---- @param id integer
-local function create_image(path, id)
+--- @param image_id integer
+--- @param range Range4
+local function create_image(path, image_id, range)
   path = vim.base64.encode(path)
-  send_kitty_escape("q=2,f=100,t=f,i=" .. id .. ";" .. path)
+  local width, height = range_to_dimensions(range)
+  -- read file
+  send_kitty_escape("q=2,f=100,t=t,i=" .. image_id .. ";" .. path)
+  -- render file at size
+  send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
 end
 
 
@@ -430,45 +447,69 @@ local pid = vim.fn.getpid()
 --- @param bufnr integer
 --- @return string
 local function typst_file_path(id, bufnr)
-  return "/tmp/typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
+  return "/tmp/tty-graphics-protocol-typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
 end
 
---- @param bufnr? integer Which buffer to render, defaulting to current buffer
-local function render_buf(bufnr)
-  vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
-  bufnr = default(bufnr, vim.fn.bufnr())
-  local parser = vim.treesitter.get_parser(bufnr)
-  local tree = parser:parse({})
+--- @type vim.Diagnostic[]
+local diagnostics = {}
+--- @type integer
+local remaining_images = 0
 
-  --- @type { [integer]: Range4 }
-  local rows = {}
 
-  ---@type { [integer]: vim.SystemObj }
-  local waits = {}
+--- @param status_code integer
+--- @param stderr uv_pipe_t
+--- @param original_range Range4 This range may be out of date by this point, but it is good enough for diagnostics
+--- @param image_id integer
+--- @param bufnr integer
+local function on_typst_exit(status_code, stderr, original_range, image_id, bufnr)
+  stderr:shutdown()
+  local err_bucket = {}
+  stderr:read_start(function(err, data)
+    if err then
+      error(err)
+    end
+    if data then
+      err_bucket[#err_bucket + 1] = data
+    else
+      stderr:close()
+    end
+  end)
 
-  local query = vim.treesitter.query.parse("typst", "(math) @math")
-  for _, node in query:iter_captures(tree[1]:root()) do
-    local start_row, start_col, end_row, end_col = node:range()
-    local str = range_to_string({ start_row, start_col, end_row, end_col }, bufnr)
-    local id = counter
-    counter = counter + 1
-    local path = typst_file_path(id, bufnr)
-    --local obj = vim.system({ "typst", "--color=always", "compile", "-", path }, {
-    local obj = vim.system({ "typst", "compile", "-", path }, {
-      stdin = { typst_prelude, str },
-      timeout = 1000,
-    })
-    waits[id] = obj
-    rows[id] = { start_row, start_col, end_row, end_col }
-  end
+  local check = assert(vim.uv.new_check())
+  check:start(function()
+    if not stderr:is_closing() then
+      return
+    end
+    check:stop()
+    check:close()
 
-  --- @type vim.Diagnostic[]
-  local diagnostics = {}
+    local path = typst_file_path(image_id, bufnr)
+    create_image(path, image_id, original_range)
 
-  for id, obj in pairs(waits) do
-    local status = obj:wait()
-    if status.code == 124 then
-      local range = rows[id]
+    local err = table.concat(err_bucket)
+    if err ~= "" then
+      diagnostics[#diagnostics + 1] = {
+        bufnr = bufnr,
+        lnum = original_range[1],
+        col = original_range[2],
+        end_lnum = original_range[3],
+        end_col = original_range[4],
+        message = err,
+        severity = "ERROR",
+        namespace = ns_id,
+        source = "typst-concealer"
+      }
+    end
+    remaining_images = remaining_images - 1
+    if remaining_images == 0 then
+      vim.schedule(function()
+        vim.diagnostic.set(ns_id, bufnr, diagnostics)
+      end)
+    end
+  end)
+
+  --[[
+    if status_code == 124 then
       diagnostics[#diagnostics + 1] = {
         bufnr = bufnr,
         lnum = tonumber(range[1]),
@@ -480,30 +521,66 @@ local function render_buf(bufnr)
         namespace = ns_id,
         source = "typst-concealer"
       }
-      rows[id] = nil -- don't render if failed
-    elseif status.stderr ~= "" then
-      local range = rows[id]
-      diagnostics[#diagnostics + 1] = {
-        bufnr = bufnr,
-        lnum = tonumber(range[1]),
-        col = tonumber(range[2]),
-        end_lnum = tonumber(range[3]),
-        end_col = tonumber(range[4]),
-        message = status.stderr,
-        severity = "ERROR",
-        namespace = ns_id,
-        source = "typst-concealer"
-      }
-      rows[id] = nil -- don't render if failed
-    end
-  end
-  vim.diagnostic.set(ns_id, bufnr, diagnostics)
+    ]] --
+  -- TODO: if rendering failed, then delete the unicode range
+end
 
-  for id, range in pairs(rows) do
-    local path = typst_file_path(id, bufnr)
-    create_image(path, id)
+local query = vim.treesitter.query.parse("typst", "(math) @math")
+
+--- @param bufnr? integer Which buffer to render, defaulting to current buffer
+local function render_buf(bufnr)
+  vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+  bufnr = default(bufnr, vim.fn.bufnr())
+  local parser = vim.treesitter.get_parser(bufnr)
+  local tree = parser:parse()[1]
+
+  diagnostics = {}
+
+  -- this won't work because other open buffers may have open images
+  -- local counter = 1
+
+  --- @type { [integer]: Range4 }
+  local ranges = {}
+
+  -- TODO: consider iterating this async?
+  for _, node in query:iter_captures(tree:root(), bufnr) do
+    local start_row, start_col, end_row, end_col = node:range()
+    local range = { start_row, start_col, end_row, end_col }
+    local image_id = counter
+    counter = counter + 1
+    remaining_images = remaining_images + 1
+    --local obj = vim.system({ "typst", "--color=always", "compile", "-", path }, {
+
+    ranges[image_id] = { start_row, start_col, end_row, end_col }
+  end
+
+  for id, range in pairs(ranges) do
     render_image(id, range)
   end
+
+  vim.schedule(function()
+    for id, orignal_range in pairs(ranges) do
+      -- TODO: use stdout maybe?
+      local path = typst_file_path(id, bufnr)
+      local str = range_to_string(orignal_range, bufnr)
+
+      local stdin = vim.uv.new_pipe()
+      local stdout = vim.uv.new_pipe()
+      local stderr = vim.uv.new_pipe()
+
+      local handle = vim.uv.spawn("typst", {
+        stdio = { stdin, stdout, stderr },
+        args = { "compile", "-", path },
+      }, function(code, signal)
+        on_typst_exit(code, stderr, orignal_range, id, bufnr)
+      end)
+      vim.schedule(function()
+        stdin:write({ typst_prelude, str })
+        stdin:close()
+        stdout:close()
+      end)
+    end
+  end)
 end
 
 local prev_hidden_extmark_id = nil
@@ -627,7 +704,9 @@ function M.setup(cfg)
         group = augroup,
         desc = "typst-concealer render file on enter",
         callback = function()
-          render_buf()
+          vim.schedule(function()
+            render_buf()
+          end)
         end
       })
   end
