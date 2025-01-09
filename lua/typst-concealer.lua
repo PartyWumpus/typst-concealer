@@ -1,11 +1,18 @@
 --- @class typstconcealer
 local M = {}
 
+--- @class autocmd_event
+--- @field id integer
+--- @field event string
+--- @field group number | nil
+--- @field match string
+--- @field buf number
+--- @field file string
+--- @field data any
+
 local is_tmux = vim.env.TMUX ~= nil
 
 local typst_prelude = "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n#set text(white)\n"
-
-local counter = 1
 
 -- thanks neorg :)
 local codes = {
@@ -363,9 +370,12 @@ end
 --- Places the unicode characters to render a given image id over a range
 --- @param image_id integer
 --- @param range Range4
-local function render_image(image_id, range)
+--- @param extmark_id? integer|nil
+--- @param below? boolean should the text be virt_text or virt_lines
+local function place_image_extmarks(image_id, range, extmark_id, below)
   local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
   local width, height = range_to_dimensions(range)
+  local id = extmark_id
 
   local hl_group = "typst-concealer-image-id-" .. tostring(image_id)
   -- encode image_id into the foreground color
@@ -376,13 +386,26 @@ local function render_image(image_id, range)
     for j = 0, width - 1 do
       line = line .. codes.placeholder .. codes.diacritics[1] .. codes.diacritics[j + 1]
     end
-    vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
-      virt_text = { { line, hl_group } },
-      virt_text_pos = "overlay",
-      invalidate = true,
-      end_col = end_col,
-      end_row = end_row
-    })
+    if below then
+      id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+        id = extmark_id,
+        virt_lines = { { { line, hl_group } } },
+        virt_text_pos = "overlay",
+        invalidate = true,
+        end_col = end_col,
+        end_row = end_row
+      })
+    else
+      id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+        id = extmark_id,
+        virt_text = { { line, hl_group } },
+        virt_text_pos = "inline",
+        conceal = "",
+        invalidate = true,
+        end_col = end_col,
+        end_row = end_row
+      })
+    end
   else
     --local lines = {}
     for i = 0, height - 1 do
@@ -409,6 +432,8 @@ local function render_image(image_id, range)
       invalidate = true,
     })]] --
   end
+
+  return id
 end
 
 --- Takes in a range and returns the string contained within that range
@@ -440,6 +465,13 @@ local function create_image(path, image_id, range)
   send_kitty_escape("q=2,a=p,U=1,i=" .. image_id .. ",c=" .. width .. ",r=" .. height)
 end
 
+---comment
+---@param image_id integer
+local function clear_image(image_id)
+  send_kitty_escape("q=2,a=d,d=i,i=" .. image_id)
+  image_ids_in_use[image_id] = nil
+end
+
 
 local pid = vim.fn.getpid()
 --- Generates a filename for a given image id and buffer
@@ -461,7 +493,8 @@ local remaining_images = 0
 --- @param original_range Range4 This range may be out of date by this point, but it is good enough for diagnostics
 --- @param image_id integer
 --- @param bufnr integer
-local function on_typst_exit(status_code, stderr, original_range, image_id, bufnr)
+--- @param is_live_preview boolean
+local function on_typst_exit(status_code, stderr, original_range, image_id, bufnr, is_live_preview)
   stderr:shutdown()
   local err_bucket = {}
   stderr:read_start(function(err, data)
@@ -487,8 +520,9 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
     create_image(path, image_id, original_range)
 
     local err = table.concat(err_bucket)
+    local diagnostic = nil
     if err ~= "" then
-      diagnostics[#diagnostics + 1] = {
+      diagnostic = {
         bufnr = bufnr,
         lnum = original_range[1],
         col = original_range[2],
@@ -500,10 +534,19 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
         source = "typst-concealer"
       }
     end
-    remaining_images = remaining_images - 1
-    if remaining_images == 0 then
+    if not is_live_preview then
+      remaining_images = remaining_images - 1
+      diagnostics[#diagnostics + 1] = diagnostic
+      if remaining_images == 0 then
+        vim.schedule(function()
+          vim.diagnostic.set(ns_id, bufnr, diagnostics)
+        end)
+      end
+    else
       vim.schedule(function()
-        vim.diagnostic.set(ns_id, bufnr, diagnostics)
+        local temp = vim.deepcopy(diagnostics, true)
+        temp[#temp + 1] = diagnostic
+        vim.diagnostic.set(ns_id, bufnr, temp, { update_in_insert = true })
       end)
     end
   end)
@@ -525,16 +568,69 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
   -- TODO: if rendering failed, then delete the unicode range
 end
 
+--- @param bufnr integer
+--- @param id integer
+--- @param orignal_range Range4
+--- @param str string
+--- @param is_live_preview boolean
+local function compile_image(bufnr, id, orignal_range, str, is_live_preview)
+  -- TODO: use stdout maybe?
+  local path = typst_file_path(id, bufnr)
+
+  local stdin = vim.uv.new_pipe()
+  local stdout = vim.uv.new_pipe()
+  local stderr = vim.uv.new_pipe()
+
+  local handle = vim.uv.spawn("typst", {
+    stdio = { stdin, stdout, stderr },
+    args = { "compile", "-", path },
+  }, function(code, signal)
+    on_typst_exit(code, stderr, orignal_range, id, bufnr, is_live_preview)
+  end)
+  stdin:write({ typst_prelude, str })
+  stdin:close()
+  stdout:close()
+end
+
+image_ids_in_use = {}
+---@param bufnr integer
+---@return integer
+local function new_image_id(bufnr)
+  for i = 1, 240 do
+    if image_ids_in_use[i] == nil then
+      image_ids_in_use[i] = bufnr
+      return i
+    end
+  end
+  -- Image id table full, overflow it
+  print("[typst-concealer] too many image ids in use, overflowing")
+  image_ids_in_use = { true }
+  return 1
+end
+
 local query = vim.treesitter.query.parse("typst", "(math) @math")
+
+local function reset_buf(bufnr)
+  vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
+  Live_preview_extmark_id = nil
+  hidden_extmark_ids = {}
+  diagnostics = {}
+  vim.schedule(function()
+    vim.diagnostic.set(ns_id, bufnr, diagnostics)
+  end)
+  for id, image_bufnr in pairs(image_ids_in_use) do
+    if (bufnr == image_bufnr) then
+      clear_image(id)
+    end
+  end
+end
 
 --- @param bufnr? integer Which buffer to render, defaulting to current buffer
 local function render_buf(bufnr)
-  vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
   bufnr = default(bufnr, vim.fn.bufnr())
+  reset_buf(bufnr)
   local parser = vim.treesitter.get_parser(bufnr)
-  local tree = parser:parse()[1]
-
-  diagnostics = {}
+  local tree = parser:parse()[1]:root()
 
   -- this won't work because other open buffers may have open images
   -- local counter = 1
@@ -543,124 +639,152 @@ local function render_buf(bufnr)
   local ranges = {}
 
   -- TODO: consider iterating this async?
-  for _, node in query:iter_captures(tree:root(), bufnr) do
+  for _, node in query:iter_captures(tree, bufnr) do
     local start_row, start_col, end_row, end_col = node:range()
-    local range = { start_row, start_col, end_row, end_col }
-    local image_id = counter
-    counter = counter + 1
+    local image_id = new_image_id(bufnr)
     remaining_images = remaining_images + 1
-    --local obj = vim.system({ "typst", "--color=always", "compile", "-", path }, {
 
     ranges[image_id] = { start_row, start_col, end_row, end_col }
   end
 
   for id, range in pairs(ranges) do
-    render_image(id, range)
+    place_image_extmarks(id, range)
   end
 
-  vim.schedule(function()
-    for id, orignal_range in pairs(ranges) do
-      -- TODO: use stdout maybe?
-      local path = typst_file_path(id, bufnr)
-      local str = range_to_string(orignal_range, bufnr)
-
-      local stdin = vim.uv.new_pipe()
-      local stdout = vim.uv.new_pipe()
-      local stderr = vim.uv.new_pipe()
-
-      local handle = vim.uv.spawn("typst", {
-        stdio = { stdin, stdout, stderr },
-        args = { "compile", "-", path },
-      }, function(code, signal)
-        on_typst_exit(code, stderr, orignal_range, id, bufnr)
-      end)
-      vim.schedule(function()
-        stdin:write({ typst_prelude, str })
-        stdin:close()
-        stdout:close()
-      end)
-    end
-  end)
+  for id, range in pairs(ranges) do
+    local str = range_to_string(range, bufnr)
+    vim.schedule(function()
+      compile_image(bufnr, id, range, str, false)
+    end)
+  end
+  hide_extmarks_at_cursor()
 end
 
-local prev_hidden_extmark_id = nil
+hidden_extmark_ids = {}
 
-local function show_hidden_extmark()
-  if prev_hidden_extmark_id == nil then
-    return
-  end
+function hide_extmarks_at_cursor()
   local bufnr = vim.fn.bufnr()
-  local m = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, prev_hidden_extmark_id, { details = true })
-  local row, col, opts = m[1], m[2], m[3]
-  vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
-    id = prev_hidden_extmark_id,
-    virt_text_pos = "overlay",
-
-    end_row = opts.end_row,
-    end_col = opts.end_col,
-    priority = opts.priority,
-    hl_group = opts.hl_group,
-    --- @diagnostic disable-next-line:assign-type-mismatch bug in core
-    end_right_gravity = opts.end_right_gravity,
-    right_gravity = opts.right_gravity,
-    hl_eol = opts.hl_eol,
-    virt_text = opts.virt_text,
-    virt_text_hide = opts.virt_text_hide,
-    virt_text_repeat_linebreak = opts.virt_text_repeat_linebreak,
-    virt_text_win_col = opts.virt_text_win_col,
-    hl_mode = opts.hl_mode,
-    line_hl_group = opts.line_hl_group,
-    spell = opts.spell,
-    --- @diagnostic disable-next-line:assign-type-mismatch fixed in 0.11
-    url = opts.url,
-  })
-  prev_hidden_extmark_id = nil
-end
-
-local function hide_extmark_at_cursor()
-  local bufnr = vim.fn.bufnr()
-  local cursor_pos = vim.api.nvim_win_get_cursor(0)
-  cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] }
-  local extmark = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, cursor_pos, cursor_pos, {
-    overlap = true,
-    limit = 1,
-    details = true
-  })[1]
-
-  if extmark == nil and prev_hidden_extmark_id ~= nil then
-    show_hidden_extmark()
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+  local range_line = vim.fn.getpos('v')[2] - 1
+  local extmarks
+  if range_line > cursor_line then
+    extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, { cursor_line, 0 }, { range_line, -1 }, {
+      overlap = true,
+      details = true
+    })
+  else
+    extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, { range_line, 0, }, { cursor_line, -1 }, {
+      overlap = true,
+      details = true,
+      type = "virt_text"
+    })
   end
 
-  if extmark ~= nil and extmark[1] ~= prev_hidden_extmark_id then
+  local new_hidden = {}
+
+  for _, extmark in ipairs(extmarks) do
     --- @type integer, integer, integer, vim.api.keyset.extmark_details
     local id, row, col, opts = extmark[1], extmark[2], extmark[3], extmark[4]
-    vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
-      id = id,
-      virt_text_pos = "eol",
+    if hidden_extmark_ids[id] ~= nil then
+      new_hidden[id] = hidden_extmark_ids[id]
+      hidden_extmark_ids[id] = nil
+    else
+      new_hidden[id] = opts.virt_text
+      hidden_extmark_ids[id] = nil
+      vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
+        id = id,
+        virt_text = { { "" } },
 
-      end_row = opts.end_row,
-      end_col = opts.end_col,
-      priority = opts.priority,
-      hl_group = opts.hl_group,
-      --- @diagnostic disable-next-line:assign-type-mismatch bug in core
-      end_right_gravity = opts.end_right_gravity,
-      right_gravity = opts.right_gravity,
-      hl_eol = opts.hl_eol,
-      virt_text = opts.virt_text,
-      virt_text_hide = opts.virt_text_hide,
-      virt_text_repeat_linebreak = opts.virt_text_repeat_linebreak,
-      virt_text_win_col = opts.virt_text_win_col,
-      hl_mode = opts.hl_mode,
-      line_hl_group = opts.line_hl_group,
-      spell = opts.spell,
-      --- @diagnostic disable-next-line:assign-type-mismatch fixed in 0.11
-      url = opts.url,
-    })
-    if extmark[1] ~= prev_hidden_extmark_id then
-      show_hidden_extmark()
+        end_row = opts.end_row,
+        end_col = opts.end_col,
+        conceal = opts.conceal,
+        virt_text_pos = opts.virt_text_pos,
+        invalidate = opts.invalidate,
+      })
     end
-    prev_hidden_extmark_id = id
   end
+
+  -- show remaining extmarks not in selected lines
+  for id, text in pairs(hidden_extmark_ids) do
+    local m = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, id, { details = true })
+    if #m ~= 0 then
+      --- @type integer, integer, integer, vim.api.keyset.extmark_details
+      local row, col, opts = m[1], m[2], m[3]
+      vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
+        id = id,
+        virt_text = text,
+
+        end_row = opts.end_row,
+        end_col = opts.end_col,
+        conceal = opts.conceal,
+        virt_text_pos = opts.virt_text_pos,
+        invalidate = opts.invalidate,
+      })
+    end
+  end
+
+  hidden_extmark_ids = new_hidden
+end
+
+local function get_math_block_at_cursor()
+  local parser = vim.treesitter.get_parser(0)
+  local tree = parser:parse()[1]:root()
+  local cursor_pos = vim.api.nvim_win_get_cursor(0)
+  cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] }
+  local element = tree:named_descendant_for_range(cursor_pos[1], cursor_pos[2], cursor_pos[3], cursor_pos[4])
+  while true do
+    if element == nil then
+      return nil
+    elseif element:type() ~= "math" then
+      element = element:parent()
+    else
+      break
+    end
+  end
+  if element ~= nil then
+    return element:range()
+  end
+
+  return nil
+end
+
+--- @type {image_id: integer, extmark_id: integer} | nil
+preview_image = nil
+
+---comment
+---@param bufnr integer
+local function clear_live_typst_preview(bufnr)
+  if preview_image ~= nil then
+    clear_image(preview_image.image_id)
+    vim.api.nvim_buf_del_extmark(bufnr, ns_id, preview_image.extmark_id)
+    preview_image = nil
+  end
+end
+
+local function render_live_typst_preview()
+  local bufnr = vim.fn.bufnr()
+  local start_row, start_col, end_row, end_col = get_math_block_at_cursor()
+  if start_row == nil then
+    clear_live_typst_preview(bufnr)
+    return
+  end
+  if start_row ~= end_row then
+    -- TODO:
+    return
+  end
+  local range = { start_row, start_col, end_row, end_col }
+  local str = range_to_string(range, bufnr)
+  local prev_extmark = nil
+  if preview_image ~= nil then
+    clear_image(preview_image.image_id)
+    prev_extmark = preview_image.extmark_id
+  end
+  local new_preview = {}
+  new_preview.image_id = new_image_id(bufnr)
+  compile_image(bufnr, new_preview.image_id, range, str, true)
+  new_preview.extmark_id = place_image_extmarks(new_preview.image_id, range, prev_extmark, true)
+  vim.print(new_preview)
+  preview_image = new_preview
 end
 
 --- @class typstconfig
@@ -711,51 +835,41 @@ function M.setup(cfg)
       })
   end
 
+  vim.api.nvim_create_autocmd({ "CursorMovedI", "CursorMoved", "ModeChanged" },
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer unconceal on line hover",
+      callback = function()
+        hide_extmarks_at_cursor()
+      end
+    })
+
+  vim.api.nvim_create_autocmd({ "CursorMoved", "ModeChanged" },
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer remove preview when not in insert mode",
+      --- @param ev autocmd_event
+      callback = function(ev)
+        clear_live_typst_preview(ev.buf)
+      end
+    })
+
   vim.api.nvim_create_autocmd("CursorMovedI",
     {
       pattern = "*.typ",
       group = augroup,
-      desc = "typst-concealer render file on enter",
+      desc = "typst-concealer render live preview",
       callback = function()
-        hide_extmark_at_cursor()
+        render_live_typst_preview()
       end
     })
-
-  vim.api.nvim_create_autocmd("InsertLeave",
-    {
-      pattern = "*.typ",
-      group = augroup,
-      desc = "typst-concealer render file on enter",
-      callback = function()
-        show_hidden_extmark()
-      end
-    })
-
-  vim.api.nvim_create_autocmd("InsertEnter",
-    {
-      pattern = "*.typ",
-      group = augroup,
-      desc = "typst-concealer render file on enter",
-      callback = function()
-        hide_extmark_at_cursor()
-      end
-    })
-
-  -- TODO: make this only rerender the thing being worked on (or do nothing, if no block is selected)
-  --[[vim.api.nvim_create_autocmd("CursorMovedI",
-    {
-      pattern = "*.typ",
-      group = augroup,
-      desc = "typst-concealer render file on enter",
-      callback = function()
-        render_buf()
-      end
-    })]] --
 
 
   vim.keymap.set("n", "<leader>tt", render_buf, { desc = "[typst-concealer] re-render" })
   vim.keymap.set("n", "<leader>tr", function()
-    vim.api.nvim_buf_clear_namespace(0, ns_id, 0, -1)
+    reset_buf(vim.fn.bufnr())
   end, { desc = "[typst-concealer] clear" })
 end
 
