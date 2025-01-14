@@ -447,7 +447,6 @@ local function place_image_extmarks(image_id, range, extmark_id, below)
         virt_text = { { line, hl_group } },
         virt_text_pos = "overlay",
         invalidate = true,
-        end_col = end_col,
         end_row = start_row + i
       })
       table.insert(ids, id)
