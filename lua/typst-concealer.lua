@@ -361,7 +361,7 @@ local tmux_escape = function(message)
   return "\x1bPtmux;" .. message:gsub("\x1b", "\x1b\x1b") .. "\x1b\\"
 end
 
-local vim_stdout = vim.loop.new_tty(1, false)
+local vim_stdout = assert(vim.loop.new_tty(1, false))
 --- Sends a kitty graphics message, adding the APC escape code stuff
 --- @param message string
 local function send_kitty_escape(message)
@@ -809,9 +809,8 @@ local function render_live_typst_preview()
   end
   local new_preview = {}
   new_preview.image_id = new_image_id(bufnr)
-  compile_image(bufnr, new_preview.image_id, range, str, true)
-  new_preview.extmark_id = place_image_extmarks(new_preview.image_id, range, prev_extmark, true)
-  vim.print(new_preview)
+  new_preview.extmark_id = place_image_extmarks(new_preview.image_id, range, prev_extmark, true)[1]
+  compile_image(bufnr, new_preview.image_id, range, str, {}, true)
   preview_image = new_preview
 end
 
@@ -921,7 +920,7 @@ function M.setup(cfg)
 
   -- TODO: determine better way of doing this
   vim.opt.conceallevel = 2
-  vim.opt.concealcursor = "nv"
+  --vim.opt.concealcursor = "nv"
 end
 
 return M
