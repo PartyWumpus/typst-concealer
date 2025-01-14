@@ -8,7 +8,28 @@ Has live previews as you type in insert mode.
 https://github.com/user-attachments/assets/94179603-2f41-43ff-9e5f-6dc4f31dc02d
 
 ## Installation
-Lazy.nvim: `{ 'PartyWumpus/typst-concealer', config = function() require('typst-concealer').setup{} end, event = "VeryLazy" },`
+Lazy.nvim:
+```lua
+{
+ 'PartyWumpus/typst-concealer',
+ config = function()
+  require('typst-concealer').setup{}
+ end,
+ event = "VeryLazy"
+},
+```
+
+### Keybinds
+Typst-concealer can be disabled/enabled inside buffers. You can change the default with the `enabled_by_default` option.
+```lua
+-- example keybinds
+vim.keymap.set("n", "<leader>ts", function()
+ require('typst-concealer').enable_buf(vim.fn.bufnr())
+end)
+vim.keymap.set("n", "<leader>th", function()
+ require('typst-concealer').disable_buf(vim.fn.bufnr())
+end)
+```
 
 ## Known issues / Todo list
 - It doesn't actually hide the text beneath multiline images properly, so sometimes it's visible (if >75 chars)

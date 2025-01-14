@@ -10,6 +10,9 @@ local M = {}
 --- @field file string
 --- @field data any
 
+--- @type { [integer]: boolean }
+M._enabled_buffers = {}
+
 local is_tmux = vim.env.TMUX ~= nil
 
 --- Sets up the constant typst prelude string
@@ -19,7 +22,7 @@ local function setup_prelude(color)
     color = string.format('rgb("#%06X")', vim.api.nvim_get_hl(0, { name = "Normal" })["fg"])
   end
   -- FIXME: lists everything. agony. hope https://github.com/typst/typst/issues/5694 is resolved.
-  M.prelude = '' ..
+  M._prelude = '' ..
       '#set page(width: auto, height: auto, margin: 0pt, fill: none)\n' ..
       '#set text(' .. color .. ', font: "DejaVu Sans Mono", top-edge: "ascender", bottom-edge: "descender")\n' ..
       '#set line(stroke: ' .. color .. ')\n' ..
@@ -602,7 +605,7 @@ local function compile_image(bufnr, id, orignal_range, str, extmark_ids, is_live
   }, function(code, signal)
     on_typst_exit(stderr, orignal_range, id, bufnr, extmark_ids, is_live_preview)
   end)
-  stdin:write({ M.prelude, str })
+  stdin:write({ M._prelude, str })
   stdin:close()
   stdout:close()
 end
@@ -631,9 +634,7 @@ local function reset_buf(bufnr)
   Live_preview_extmark_id = nil
   hidden_extmark_ids = {}
   diagnostics = {}
-  vim.schedule(function()
-    vim.diagnostic.set(ns_id, bufnr, diagnostics)
-  end)
+
   for id, image_bufnr in pairs(image_ids_in_use) do
     if (bufnr == image_bufnr) then
       clear_image(id)
@@ -641,10 +642,20 @@ local function reset_buf(bufnr)
   end
 end
 
+local function clear_diagnostics(bufnr)
+  vim.schedule(function()
+    vim.diagnostic.reset(ns_id, bufnr)
+  end)
+end
+
 --- @param bufnr? integer Which buffer to render, defaulting to current buffer
 local function render_buf(bufnr)
   bufnr = default(bufnr, vim.fn.bufnr())
   reset_buf(bufnr)
+  clear_diagnostics(bufnr)
+  if M._enabled_buffers[bufnr] ~= true then
+    return
+  end
   local parser = vim.treesitter.get_parser(bufnr)
   local tree = parser:parse()[1]:root()
 
@@ -815,23 +826,31 @@ local function render_live_typst_preview()
 end
 
 --- @class typstconfig
---- @field render_on_enter? boolean Should typst-concealer render all typst blocks when a file is first entered?
---- @field rerender_on_save? boolean Should typst-concealer rerender all typst blocks when a file is saved?
 --- @field allow_missing_typst? boolean Allow the plugin to load without the typst binary in the path
 --- @field do_diagnostics? boolean Should typst-concealer provide diagnostics on error?
---- @field color? string What color should typst render text/stroke with? (defaults to your color scheme's Normal color)
+--- @field color? string What color should typst-concealer render text/stroke with? (defaults to your color scheme's Normal color)
+--- @field enabled_by_default boolean Should typst-concealer conceal newly opened buffers by default?
 
 local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
+
+M.enable_buf = function(bufnr)
+  M._enabled_buffers[bufnr] = true
+  render_buf(bufnr)
+end
+
+M.disable_buf = function(bufnr)
+  M._enabled_buffers[bufnr] = nil
+  render_buf(bufnr)
+end
 
 --- Initializes typst-concealer
 --- @param cfg typstconfig
 --- @see typstconfig
 function M.setup(cfg)
   local config = {
-    render_on_enter = default(cfg.render_on_enter, true),
-    rerender_on_save = default(cfg.rerender_on_save, true),
     allow_missing_typst = default(cfg.allow_missing_typst, false),
     do_diagnostics = default(cfg.do_diagnostics, true),
+    enabled_by_default = default(cfg.enabled_by_default, true)
   }
 
   setup_prelude(cfg.color)
@@ -841,32 +860,47 @@ function M.setup(cfg)
     error("Typst executable not found in path, typst-concealer will not work")
   end
 
+  if vim.v.vim_did_enter then
+    local bufnr = vim.fn.bufnr()
+    M._enabled_buffers[bufnr] = true
+    render_buf(bufnr)
+  end
 
-  if config.render_on_enter then
-    vim.api.nvim_create_autocmd("BufEnter",
-      {
-        pattern = "*.typ",
-        group = augroup,
-        desc = "typst-concealer render file on enter",
-        callback = function()
+
+  vim.api.nvim_create_autocmd("BufEnter",
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer render file on enter",
+      callback = function()
+        render_buf()
+      end
+    })
+
+  vim.api.nvim_create_autocmd({ "BufNew", "VimEnter" },
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer enable file on creation",
+      --- @param ev autocmd_event
+      callback = function(ev)
+        if M.config.enabled_by_default then
+          M._enabled_buffers[ev.buf] = true
+        end
+      end
+    })
+
+  vim.api.nvim_create_autocmd("BufWritePost",
+    {
+      pattern = "*.typ",
+      group = augroup,
+      desc = "typst-concealer render file on enter",
+      callback = function()
+        vim.schedule(function()
           render_buf()
-        end
-      })
-  end
-
-  if config.rerender_on_save then
-    vim.api.nvim_create_autocmd("BufWritePost",
-      {
-        pattern = "*.typ",
-        group = augroup,
-        desc = "typst-concealer render file on enter",
-        callback = function()
-          vim.schedule(function()
-            render_buf()
-          end)
-        end
-      })
-  end
+        end)
+      end
+    })
 
   vim.api.nvim_create_autocmd({ "CursorMovedI", "CursorMoved", "ModeChanged" },
     {
@@ -911,12 +945,6 @@ function M.setup(cfg)
         end
       })
   end
-
-
-  vim.keymap.set("n", "<leader>tt", render_buf, { desc = "[typst-concealer] re-render" })
-  vim.keymap.set("n", "<leader>tr", function()
-    reset_buf(vim.fn.bufnr())
-  end, { desc = "[typst-concealer] clear" })
 
   -- TODO: determine better way of doing this
   vim.opt.conceallevel = 2
