@@ -919,6 +919,10 @@ function M.setup(cfg)
   vim.keymap.set("n", "<leader>tr", function()
     reset_buf(vim.fn.bufnr())
   end, { desc = "[typst-concealer] clear" })
+
+  -- TODO: determine better way of doing this
+  vim.opt.conceallevel = 2
+  vim.opt.concealcursor = "nv"
 end
 
 return M
