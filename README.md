@@ -8,7 +8,7 @@ Has live previews as you type in insert mode.
 https://github.com/user-attachments/assets/94179603-2f41-43ff-9e5f-6dc4f31dc02d
 
 ## Installation
-Lazy.nvim: `{ 'PartyWumpus/typst-concealer', config = function() require('typst-concealer').setup() end, event = "VeryLazy" },`
+Lazy.nvim: `{ 'PartyWumpus/typst-concealer', config = function() require('typst-concealer').setup{} end, event = "VeryLazy" },`
 
 ## Known issues / Todo list
 - It doesn't actually hide the text beneath multiline images properly, so sometimes it's visible (if >75 chars)
