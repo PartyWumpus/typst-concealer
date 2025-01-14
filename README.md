@@ -12,10 +12,9 @@ Lazy.nvim: `{ 'PartyWumpus/typst-concealer', config = function() require('typst-
 
 ## Known issues / Todo list
 - It doesn't actually hide the text beneath multiline images properly, so sometimes it's visible (if >75 chars)
-- When typst is unhidden, it doesn't rerender after an edit
 - Mulitline typst things are just rendered at a fixed length of 75 characters, which is perhaps a little silly
-- The source text for an error is still covered by invisible characters
-- Diagnostics are a little weird across multiple buffers
+- Multiline typst is not unhidden as a group, or given a preview
+- When typst is unhidden, it doesn't rerender after an edit
 - Assumes a mutable /tmp folder
-- Doesn't render #images
 - Breaks sometimes, pls report if any errors happen
+- The rules about positioning of multiline/inline are totally different from what typst actually does

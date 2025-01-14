@@ -12,7 +12,30 @@ local M = {}
 
 local is_tmux = vim.env.TMUX ~= nil
 
-local typst_prelude = "#set page(width: auto, height: auto, margin: 0pt, fill: none)\n#set text(white)\n"
+--- Sets up the constant typst prelude string
+---@param color string? Any valid string that typst would accept, hex, name etc, otherwise defaults to colorscheme Default
+local function setup_prelude(color)
+  if (color == nil) then
+    color = string.format('rgb("#%06X")', vim.api.nvim_get_hl(0, { name = "Normal" })["fg"])
+  end
+  -- FIXME: lists everything. agony. hope https://github.com/typst/typst/issues/5694 is resolved.
+  M.prelude = '' ..
+      '#set page(width: auto, height: auto, margin: 0pt, fill: none)\n' ..
+      '#set text(' .. color .. ', font: "DejaVu Sans Mono", top-edge: "ascender", bottom-edge: "descender")\n' ..
+      '#set line(stroke: ' .. color .. ')\n' ..
+      '#set table(stroke: ' .. color .. ')\n' ..
+      '#set circle(stroke: ' .. color .. ')\n' ..
+      '#set ellipse(stroke: ' .. color .. ')\n' ..
+      '#set line(stroke: ' .. color .. ')\n' ..
+      '#set path(stroke: ' .. color .. ')\n' ..
+      '#set polygon(stroke: ' .. color .. ')\n' ..
+      '#set rect(stroke: ' .. color .. ')\n' ..
+      '#set square(stroke: ' .. color .. ')\n' ..
+      '#set box(stroke: ' .. color .. ')\n' ..
+      ''
+end
+
+
 
 -- thanks neorg :)
 local codes = {
@@ -367,15 +390,19 @@ end
 
 -- Thanks https://github.com/3rd/image.nvim/issues/259 for showing how to do this with a code example!
 
+--- TODO: for unhiding entire multiline regions in one go
+local mark_groups = {}
 --- Places the unicode characters to render a given image id over a range
 --- @param image_id integer
 --- @param range Range4
 --- @param extmark_id? integer|nil
 --- @param below? boolean should the text be virt_text or virt_lines
+--- @return { [integer]: integer } array of extmark IDs that correspond to this image
 local function place_image_extmarks(image_id, range, extmark_id, below)
   local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
   local width, height = range_to_dimensions(range)
-  local id = extmark_id
+  --- @type { [integer]: integer }
+  local ids = {}
 
   local hl_group = "typst-concealer-image-id-" .. tostring(image_id)
   -- encode image_id into the foreground color
@@ -387,16 +414,16 @@ local function place_image_extmarks(image_id, range, extmark_id, below)
       line = line .. codes.placeholder .. codes.diacritics[1] .. codes.diacritics[j + 1]
     end
     if below then
-      id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+      ids = { vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
         id = extmark_id,
         virt_lines = { { { line, hl_group } } },
         virt_text_pos = "overlay",
         invalidate = true,
         end_col = end_col,
         end_row = end_row
-      })
+      }) }
     else
-      id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+      ids = { vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
         id = extmark_id,
         virt_text = { { line, hl_group } },
         virt_text_pos = "inline",
@@ -404,36 +431,33 @@ local function place_image_extmarks(image_id, range, extmark_id, below)
         invalidate = true,
         end_col = end_col,
         end_row = end_row
-      })
+      }) }
     end
   else
-    --local lines = {}
     for i = 0, height - 1 do
       local line = ""
       for j = 0, width - 1 do
         line = line .. codes.placeholder .. codes.diacritics[i + 1] .. codes.diacritics[j + 1]
       end
-      --table.insert(lines, { line, hl_group })
-      -- FIXME: silly
-      vim.api.nvim_buf_set_extmark(0, ns_id, start_row + i, start_col, {
+      -- TODO: I really hope there is a better way to do this?
+      -- Mulitline conceal doesn't work, it only unhides the one line you look at,
+      -- not the whole region. Multiline text replace with virt_lines/virt_text also doesn't
+      -- work because virt lines displace instead of replacing. :(
+      local id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row + i, start_col, {
         virt_text = { { line, hl_group } },
         virt_text_pos = "overlay",
         invalidate = true,
         end_col = end_col,
         end_row = start_row + i
       })
+      table.insert(ids, id)
     end
-    --[[vim.api.nvim_buf_set_extmark(0, ns_id, start_row, 0, {
-      virt_text = lines,
-      virt_text_repeat_linebreak = true,
-      virt_text_pos = "overlay",
-      end_row = end_row,
-      end_col = end_col,
-      invalidate = true,
-    })]] --
+    for _, id in pairs(ids) do
+      mark_groups[id] = ids
+    end
   end
 
-  return id
+  return ids
 end
 
 --- Takes in a range and returns the string contained within that range
@@ -488,13 +512,13 @@ local diagnostics = {}
 local remaining_images = 0
 
 
---- @param status_code integer
 --- @param stderr uv_pipe_t
 --- @param original_range Range4 This range may be out of date by this point, but it is good enough for diagnostics
 --- @param image_id integer
 --- @param bufnr integer
+--- @param extmark_ids { [integer]: integer }
 --- @param is_live_preview boolean
-local function on_typst_exit(status_code, stderr, original_range, image_id, bufnr, is_live_preview)
+local function on_typst_exit(stderr, original_range, image_id, bufnr, extmark_ids, is_live_preview)
   stderr:shutdown()
   local err_bucket = {}
   stderr:read_start(function(err, data)
@@ -533,47 +557,39 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
         namespace = ns_id,
         source = "typst-concealer"
       }
-    end
-    if not is_live_preview then
-      remaining_images = remaining_images - 1
-      diagnostics[#diagnostics + 1] = diagnostic
-      if remaining_images == 0 then
-        vim.schedule(function()
-          vim.diagnostic.set(ns_id, bufnr, diagnostics)
-        end)
-      end
-    else
       vim.schedule(function()
-        local temp = vim.deepcopy(diagnostics, true)
-        temp[#temp + 1] = diagnostic
-        vim.diagnostic.set(ns_id, bufnr, temp, { update_in_insert = true })
+        for _, id in ipairs(extmark_ids) do
+          vim.api.nvim_buf_del_extmark(bufnr, ns_id, id)
+        end
       end)
     end
+    if (M.config.do_diagnostics) then
+      if not is_live_preview then
+        remaining_images = remaining_images - 1
+        diagnostics[#diagnostics + 1] = diagnostic
+        if remaining_images == 0 then
+          vim.schedule(function()
+            vim.diagnostic.set(ns_id, bufnr, diagnostics)
+          end)
+        end
+      else
+        vim.schedule(function()
+          local temp = vim.deepcopy(diagnostics, true)
+          temp[#temp + 1] = diagnostic
+          vim.diagnostic.set(ns_id, bufnr, temp, { update_in_insert = true })
+        end)
+      end
+    end
   end)
-
-  --[[
-    if status_code == 124 then
-      diagnostics[#diagnostics + 1] = {
-        bufnr = bufnr,
-        lnum = tonumber(range[1]),
-        col = tonumber(range[2]),
-        end_lnum = tonumber(range[3]),
-        end_col = tonumber(range[4]),
-        message = "Typst timed out while trying to compile this (1s)",
-        severity = "WARN",
-        namespace = ns_id,
-        source = "typst-concealer"
-      }
-    ]] --
-  -- TODO: if rendering failed, then delete the unicode range
 end
 
 --- @param bufnr integer
 --- @param id integer
 --- @param orignal_range Range4
 --- @param str string
+--- @param extmark_ids { [integer]: integer }
 --- @param is_live_preview boolean
-local function compile_image(bufnr, id, orignal_range, str, is_live_preview)
+local function compile_image(bufnr, id, orignal_range, str, extmark_ids, is_live_preview)
   -- TODO: use stdout maybe?
   local path = typst_file_path(id, bufnr)
 
@@ -585,9 +601,9 @@ local function compile_image(bufnr, id, orignal_range, str, is_live_preview)
     stdio = { stdin, stdout, stderr },
     args = { "compile", "-", path },
   }, function(code, signal)
-    on_typst_exit(code, stderr, orignal_range, id, bufnr, is_live_preview)
+    on_typst_exit(stderr, orignal_range, id, bufnr, extmark_ids, is_live_preview)
   end)
-  stdin:write({ typst_prelude, str })
+  stdin:write({ M.prelude, str })
   stdin:close()
   stdout:close()
 end
@@ -608,7 +624,8 @@ local function new_image_id(bufnr)
   return 1
 end
 
-local query = vim.treesitter.query.parse("typst", "(math) @math")
+local math_query = vim.treesitter.query.parse("typst", "(math) @math")
+local code_query = vim.treesitter.query.parse("typst", "[(code (_) @type) (math)] @code")
 
 local function reset_buf(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
@@ -632,29 +649,42 @@ local function render_buf(bufnr)
   local parser = vim.treesitter.get_parser(bufnr)
   local tree = parser:parse()[1]:root()
 
-  -- this won't work because other open buffers may have open images
-  -- local counter = 1
-
-  --- @type { [integer]: Range4 }
+  --- @type { [integer]: { [1]: Range4, [2]: integer } }
   local ranges = {}
 
-  -- TODO: consider iterating this async?
-  for _, node in query:iter_captures(tree, bufnr) do
-    local start_row, start_col, end_row, end_col = node:range()
-    local image_id = new_image_id(bufnr)
-    remaining_images = remaining_images + 1
+  local prelude_count = {}
 
-    ranges[image_id] = { start_row, start_col, end_row, end_col }
+  for _, match, _ in code_query:iter_matches(tree, bufnr) do
+    local type = match[2]:type()
+    local start_row, start_col, end_row, end_col = match[2]:range()
+
+    if (type == "math") then
+      local image_id = new_image_id(bufnr)
+      remaining_images = remaining_images + 1
+      ranges[image_id] = { { start_row, start_col, end_row, end_col }, 0 }
+    elseif (type == "code") then
+      local code_flavour = match[1]:type()
+      -- TODO: Consider special-casing "call", to deal with:
+      -- Image, for larger images
+      -- Links, for working links
+      if (not vim.list_contains({ "let", "set", "import" }, code_flavour)) then
+        local image_id = new_image_id(bufnr)
+        remaining_images = remaining_images + 1
+        ranges[image_id] = { { start_row, start_col, end_row, end_col }, 0 }
+      end
+
+      if (code_flavour == "let") then
+
+      end
+    end
   end
 
-  for id, range in pairs(ranges) do
-    place_image_extmarks(id, range)
-  end
-
-  for id, range in pairs(ranges) do
+  for id, image in pairs(ranges) do
+    local range, prelude_count = image[1], image[2]
+    local extmark_ids = place_image_extmarks(id, range)
     local str = range_to_string(range, bufnr)
     vim.schedule(function()
-      compile_image(bufnr, id, range, str, false)
+      compile_image(bufnr, id, range, str, extmark_ids, false)
     end)
   end
   hide_extmarks_at_cursor()
@@ -675,8 +705,7 @@ function hide_extmarks_at_cursor()
   else
     extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, { range_line, 0, }, { cursor_line, -1 }, {
       overlap = true,
-      details = true,
-      type = "virt_text"
+      details = true
     })
   end
 
@@ -791,6 +820,8 @@ end
 --- @field render_on_enter? boolean Should typst-concealer render all typst blocks when a file is first entered?
 --- @field rerender_on_save? boolean Should typst-concealer rerender all typst blocks when a file is saved?
 --- @field allow_missing_typst? boolean Allow the plugin to load without the typst binary in the path
+--- @field do_diagnostics? boolean Should typst-concealer provide diagnostics on error?
+--- @field color? string What color should typst render text/stroke with? (defaults to your color scheme's Normal color)
 
 local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
 
@@ -798,18 +829,22 @@ local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
 --- @param cfg typstconfig
 --- @see typstconfig
 function M.setup(cfg)
-  cfg = {
+  local config = {
     render_on_enter = default(cfg.render_on_enter, true),
     rerender_on_save = default(cfg.rerender_on_save, true),
     allow_missing_typst = default(cfg.allow_missing_typst, false),
+    do_diagnostics = default(cfg.do_diagnostics, true),
   }
 
-  if not cfg.allow_missing_typst and vim.fn.executable('typst') ~= 1 then
+  setup_prelude(cfg.color)
+  M.config = config
+
+  if not config.allow_missing_typst and vim.fn.executable('typst') ~= 1 then
     error("Typst executable not found in path, typst-concealer will not work")
   end
 
 
-  if cfg.render_on_enter then
+  if config.render_on_enter then
     vim.api.nvim_create_autocmd("BufEnter",
       {
         pattern = "*.typ",
@@ -821,7 +856,7 @@ function M.setup(cfg)
       })
   end
 
-  if cfg.rerender_on_save then
+  if config.rerender_on_save then
     vim.api.nvim_create_autocmd("BufWritePost",
       {
         pattern = "*.typ",
@@ -865,6 +900,19 @@ function M.setup(cfg)
         render_live_typst_preview()
       end
     })
+
+  if (cfg.color == nil) then
+    vim.api.nvim_create_autocmd("ColorScheme",
+      {
+        group = augroup,
+        desc = "typst-concealer update colour scheme",
+        callback = function()
+          setup_prelude()
+          -- TODO: check current render status
+          render_buf(vim.fn.bufnr())
+        end
+      })
+  end
 
 
   vim.keymap.set("n", "<leader>tt", render_buf, { desc = "[typst-concealer] re-render" })
