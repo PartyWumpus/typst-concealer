@@ -862,8 +862,14 @@ function M.setup(cfg)
 
   if vim.v.vim_did_enter then
     local bufnr = vim.fn.bufnr()
-    M._enabled_buffers[bufnr] = true
-    render_buf(bufnr)
+    local str = vim.api.nvim_buf_get_name(bufnr)
+    local match = str:match(".*%.typ$")
+    if match ~= nil then
+      if M.config.enabled_by_default then
+        M._enabled_buffers[bufnr] = true
+        render_buf(bufnr)
+      end
+    end
   end
 
 
