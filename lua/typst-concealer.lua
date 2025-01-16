@@ -537,13 +537,14 @@ local diagnostics = {}
 local remaining_images = 0
 
 
+--- @param status_code integer
 --- @param stderr uv_pipe_t
 --- @param original_range Range4 This range may be out of date by this point, but it is good enough for diagnostics
 --- @param image_id integer
 --- @param bufnr integer
 --- @param extmark_ids { [integer]: integer }
 --- @param is_live_preview boolean
-local function on_typst_exit(stderr, original_range, image_id, bufnr, extmark_ids, is_live_preview)
+local function on_typst_exit(status_code, stderr, original_range, image_id, bufnr, extmark_ids, is_live_preview)
   stderr:shutdown()
   local err_bucket = {}
   stderr:read_start(function(err, data)
@@ -570,7 +571,7 @@ local function on_typst_exit(stderr, original_range, image_id, bufnr, extmark_id
 
     local err = table.concat(err_bucket)
     local diagnostic = nil
-    if err ~= "" then
+    if status_code ~= 0 and err ~= "" then
       diagnostic = {
         bufnr = bufnr,
         lnum = original_range[1],
@@ -627,7 +628,7 @@ local function compile_image(bufnr, image_id, orignal_range, str, extmark_ids, p
     stdio = { stdin, stdout, stderr },
     args = { "compile", "-", path },
   }, function(code, signal)
-    on_typst_exit(stderr, orignal_range, image_id, bufnr, extmark_ids, is_live_preview)
+    on_typst_exit(code, stderr, orignal_range, image_id, bufnr, extmark_ids, is_live_preview)
   end)
 
   -- TODO: is this really the best way of doing this?
@@ -708,8 +709,6 @@ local function render_buf(bufnr)
     if prev_range ~= nil and range_contains(prev_range, { start_row, start_col, end_row, end_col }) then
       goto continue
     end
-    vim.print({ start_row, start_col, end_row, end_col },
-      range_to_string({ start_row, start_col, end_row, end_col }, bufnr))
 
     if (type == "math") then
       local image_id = new_image_id(bufnr)
