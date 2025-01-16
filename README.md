@@ -1,9 +1,9 @@
 # Typst concealer
 
-A simple neovim plugin that uses the new(ish) kitty unicode rendering protocol thing to render typst expressions inline.
+A neovim plugin that uses the new(ish) kitty unicode rendering protocol to render typst expressions inline.
 Has live previews as you type in insert mode.
 
-~~Very~~ Reasonably experimental etc. Also it should work with tmux :)
+Is experimental. Also it should work with tmux :)
 
 https://github.com/user-attachments/assets/94179603-2f41-43ff-9e5f-6dc4f31dc02d
 
@@ -31,6 +31,23 @@ vim.keymap.set("n", "<leader>th", function()
 end)
 ```
 
+## Features
+- Live previews when in insert mode (WIP)
+- Supports top level set/let/import
+- Renders code blocks
+- Renders math blocks
+- Can automatically match your nvim colorscheme
+
+## Options
+The options are mostly explained in the types, so either take a look in the code, (look for the `typstconfig` type) or get a good lua LSP and take a look what your autocomplete tells you.
+The `styling_type` option is probably the most important one. It has three modes:
+- "colorscheme" (default): Transparent background, and match the text color to your nvim colorscheme's color. This works reasonably well for most builtins, but many libraries aren't themed properly, or just look downright weird.
+- "simple": Just remove the padding and get the width/height to fit of things to fit properly. Will have a white background, looking a little out of place in dark themes, but may be acceptable.
+- "none": Do nothing, and completely rely on the user provided `#set`s. This is best for documents that never intend to be actually rendered as pdf/html, but just in neovim, otherwise the output of either neovim or the pdf is going to look rather strange.
+
+In the future I may provide two options, one for inline typst, and one for multiline.
+These styles are applied *after* all other rules are applied.
+
 ## Known issues / Todo list
 - It doesn't actually hide the text beneath multiline images properly, so sometimes it's visible (if >75 chars)
 - Mulitline typst things are just rendered at a fixed length of 75 characters, which is perhaps a little silly
@@ -40,38 +57,4 @@ end)
 - Breaks sometimes, pls report if any errors happen
 - The rules about positioning of multiline/inline are totally different from what typst actually does
 
-## Features
-- Live previews when in insert mode
-- Renders code blocks
-- Renders math blocks
-- Matches your colorscheme
-- Doesn't break very often
 
-## Typst Feature Support
-
-- ✅ Supported by this plugin
-- 🟡 Supported "for free" by the typst treesitter implementation in a meaningful way
-- ❌ Supported by neither
-- 😀 Supported out of the box by neovim
-
-| Feature | Examples | Support |
-| ------------- | ------------- | ------------- |
-Paragraph break |	Blank line | 😀
-Strong emphasis |	`*strong*` | 🟡
-Emphasis |	`_emphasis_` | 🟡
-Raw text |	``` `print(1)` ``` | 🟡
-Link |	`https://typst.app/` | `#link` doesn't really work, but regular links do
-Label |	`<intro>` | ❌
-Reference |	`@intro` | ❌
-Heading |	`= Heading` | 🟡
-Bullet list |	`- item` | ❌
-Numbered list |	`+ item` | ❌
-Term list	| `/ Term: description` | ❌
-Math | `$x^2$` | ✅
-Line break | `\` | ❌
-Smart quote	| `'single'` or `"double"` | ❌
-Symbol shorthand | `~`, `---`	| ❌
-Code expression | `#rect(width: 1cm)` | ✅
-Top-level let/set | `#let x = "twenty five"` | ❌ (todo next)
-Character escape | `Tweet at us \#ad` | 🟡
-Comment	| `/* block */`, `// line` | 🟡

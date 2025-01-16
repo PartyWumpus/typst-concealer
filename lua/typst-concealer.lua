@@ -16,26 +16,36 @@ M._enabled_buffers = {}
 local is_tmux = vim.env.TMUX ~= nil
 
 --- Sets up the constant typst prelude string
----@param color string? Any valid string that typst would accept, hex, name etc, otherwise defaults to colorscheme Default
-local function setup_prelude(color)
-  if (color == nil) then
-    color = string.format('rgb("#%06X")', vim.api.nvim_get_hl(0, { name = "Normal" })["fg"])
+local function setup_prelude()
+  if M.config.styling_type == "colorscheme" then
+    local color = M.config.color
+    if (color == nil) then
+      color = string.format('rgb("#%06X")', vim.api.nvim_get_hl(0, { name = "Normal" })["fg"])
+    end
+    -- FIXME: lists everything. agony. hope https://github.com/typst/typst/issues/3356 is resolved.
+    M._styling_prelude = '' ..
+        '#set page(width: auto, height: auto, margin: 0pt, fill: none)\n' ..
+        '#set text(' .. color .. ', top-edge: "ascender", bottom-edge: "descender")\n' ..
+        '#set line(stroke: ' .. color .. ')\n' ..
+        '#set table(stroke: ' .. color .. ')\n' ..
+        '#set circle(stroke: ' .. color .. ')\n' ..
+        '#set ellipse(stroke: ' .. color .. ')\n' ..
+        '#set line(stroke: ' .. color .. ')\n' ..
+        '#set path(stroke: ' .. color .. ')\n' ..
+        '#set polygon(stroke: ' .. color .. ')\n' ..
+        '#set rect(stroke: ' .. color .. ')\n' ..
+        '#set square(stroke: ' .. color .. ')\n' ..
+        '#set box(stroke: ' .. color .. ')\n' ..
+        ''
+  elseif M.config.styling_type == "simple" then
+    M._styling_prelude = '' ..
+        '#set page(width: auto, height: auto, margin: 0.75pt)\n' ..
+        '#set text(top-edge: "ascender", bottom-edge: "descender")\n' ..
+        ''
+  elseif M.config.styling_type == "none" then
+    M._styling_prelude = ''
   end
-  -- FIXME: lists everything. agony. hope https://github.com/typst/typst/issues/5694 is resolved.
-  M._prelude = '' ..
-      '#set page(width: auto, height: auto, margin: 0pt, fill: none)\n' ..
-      '#set text(' .. color .. ', font: "DejaVu Sans Mono", top-edge: "ascender", bottom-edge: "descender")\n' ..
-      '#set line(stroke: ' .. color .. ')\n' ..
-      '#set table(stroke: ' .. color .. ')\n' ..
-      '#set circle(stroke: ' .. color .. ')\n' ..
-      '#set ellipse(stroke: ' .. color .. ')\n' ..
-      '#set line(stroke: ' .. color .. ')\n' ..
-      '#set path(stroke: ' .. color .. ')\n' ..
-      '#set polygon(stroke: ' .. color .. ')\n' ..
-      '#set rect(stroke: ' .. color .. ')\n' ..
-      '#set square(stroke: ' .. color .. ')\n' ..
-      '#set box(stroke: ' .. color .. ')\n' ..
-      ''
+  --M._styling_prelude = M._styling_prelude .. "#let NVIM_TYPST_CONCEALER = true\n"
 end
 
 
@@ -386,7 +396,7 @@ local function range_to_dimensions(range)
     width = end_col - start_col
   else
     -- FIXME: don't just hardcode this
-    width = 45
+    width = 75
   end
   return width, height
 end
@@ -476,6 +486,19 @@ local function range_to_string(range, bufnr)
     content[#content] = string.sub(content[#content], 0, end_col)
   end
   return table.concat(content, "\n")
+end
+
+--- Checks if parent_range contains child_range
+---@param parent_range Range4
+---@param child_range Range4
+---@return boolean
+local function range_contains(parent_range, child_range)
+  local start_row1, start_col1, end_row1, end_col1 = parent_range[1], parent_range[2], parent_range[3], parent_range[4]
+  local start_row2, start_col2, end_row2, end_col2 = child_range[1], child_range[2], child_range[3], child_range[4]
+  if end_row1 > end_row2 or (end_row1 == end_row2 and end_col1 >= end_col2) then
+    return true
+  end
+  return false
 end
 
 --- Tells terminal to read the image and link image id -> image
@@ -586,14 +609,15 @@ local function on_typst_exit(stderr, original_range, image_id, bufnr, extmark_id
 end
 
 --- @param bufnr integer
---- @param id integer
---- @param orignal_range Range4
---- @param str string
+--- @param image_id integer
+--- @param orignal_range Range4 range which is safe to use for diagnostics only
+--- @param str string typst text to render
 --- @param extmark_ids { [integer]: integer }
+--- @param prelude_count integer how far into the list of runtime_preludes should we add to the string
 --- @param is_live_preview boolean
-local function compile_image(bufnr, id, orignal_range, str, extmark_ids, is_live_preview)
+local function compile_image(bufnr, image_id, orignal_range, str, extmark_ids, prelude_count, is_live_preview)
   -- TODO: use stdout maybe?
-  local path = typst_file_path(id, bufnr)
+  local path = typst_file_path(image_id, bufnr)
 
   local stdin = vim.uv.new_pipe()
   local stdout = vim.uv.new_pipe()
@@ -603,9 +627,17 @@ local function compile_image(bufnr, id, orignal_range, str, extmark_ids, is_live
     stdio = { stdin, stdout, stderr },
     args = { "compile", "-", path },
   }, function(code, signal)
-    on_typst_exit(stderr, orignal_range, id, bufnr, extmark_ids, is_live_preview)
+    on_typst_exit(stderr, orignal_range, image_id, bufnr, extmark_ids, is_live_preview)
   end)
-  stdin:write({ M._prelude, str })
+
+  -- TODO: is this really the best way of doing this?
+  local final_str = {}
+  for i = 1, prelude_count, 1 do
+    final_str[#final_str + 1] = runtime_preludes[i]
+  end
+  final_str[#final_str + 1] = M._styling_prelude
+  final_str[#final_str + 1] = str
+  stdin:write(final_str)
   stdin:close()
   stdout:close()
 end
@@ -614,7 +646,8 @@ image_ids_in_use = {}
 ---@param bufnr integer
 ---@return integer
 local function new_image_id(bufnr)
-  for i = 1, 240 do
+  -- TODO: support ids > 255
+  for i = 5, 250 do
     if image_ids_in_use[i] == nil then
       image_ids_in_use[i] = bufnr
       return i
@@ -626,7 +659,6 @@ local function new_image_id(bufnr)
   return 1
 end
 
-local math_query = vim.treesitter.query.parse("typst", "(math) @math")
 local code_query = vim.treesitter.query.parse("typst", "[(code (_) @type) (math)] @code")
 
 local function reset_buf(bufnr)
@@ -634,6 +666,7 @@ local function reset_buf(bufnr)
   Live_preview_extmark_id = nil
   hidden_extmark_ids = {}
   diagnostics = {}
+  runtime_preludes = {}
 
   for id, image_bufnr in pairs(image_ids_in_use) do
     if (bufnr == image_bufnr) then
@@ -648,6 +681,8 @@ local function clear_diagnostics(bufnr)
   end)
 end
 
+runtime_preludes = {}
+
 --- @param bufnr? integer Which buffer to render, defaulting to current buffer
 local function render_buf(bufnr)
   bufnr = default(bufnr, vim.fn.bufnr())
@@ -661,32 +696,51 @@ local function render_buf(bufnr)
 
   --- @type { [integer]: { [1]: Range4, [2]: integer } }
   local ranges = {}
-
-  local prelude_count = {}
+  local prev_range = nil
 
   for _, match, _ in code_query:iter_matches(tree, bufnr) do
     local type = match[2]:type()
     local start_row, start_col, end_row, end_col = match[2]:range()
 
+    -- If the previous range contains this one, skip it
+    -- This check should maybe have to interate through all the previous (and future) ranges
+    -- but iter_matches goes in order so we're all good
+    if prev_range ~= nil and range_contains(prev_range, { start_row, start_col, end_row, end_col }) then
+      goto continue
+    end
+    vim.print({ start_row, start_col, end_row, end_col },
+      range_to_string({ start_row, start_col, end_row, end_col }, bufnr))
+
     if (type == "math") then
       local image_id = new_image_id(bufnr)
       remaining_images = remaining_images + 1
-      ranges[image_id] = { { start_row, start_col, end_row, end_col }, 0 }
+      ranges[image_id] = { { start_row, start_col, end_row, end_col }, #runtime_preludes }
+      prev_range = { start_row, start_col, end_row, end_col }
     elseif (type == "code") then
       local code_flavour = match[1]:type()
       -- TODO: Consider special-casing "call", to deal with:
-      -- Image, for larger images
-      -- Links, for working links
-      if (not vim.list_contains({ "let", "set", "import" }, code_flavour)) then
+      -- #image, for larger images
+      -- #link, for working links
+      -- #highlight, for looking not terrible
+      -- probably more too
+      -- Special casing would not be useful for trying to render something as closely to how typst would
+      -- but instead would be useful for those (me) using typst-concealer as the end goal
+      if (not vim.list_contains({ "let", "set", "import", "show" }, code_flavour)) then
         local image_id = new_image_id(bufnr)
         remaining_images = remaining_images + 1
-        ranges[image_id] = { { start_row, start_col, end_row, end_col }, 0 }
+        ranges[image_id] = { { start_row, start_col, end_row, end_col }, #runtime_preludes }
+        prev_range = { start_row, start_col, end_row, end_col }
       end
 
-      if (code_flavour == "let") then
-
+      if (vim.list_contains({ "let", "set", "import" }, code_flavour)) then
+        runtime_preludes[#runtime_preludes + 1] = range_to_string({ start_row, start_col, end_row, end_col }, bufnr) ..
+            "\n"
       end
+
+      -- We ignore all "show" expressions, consider not doing this.
+      -- Templates will likely completely break the render? Unsure.
     end
+    ::continue::
   end
 
   for id, image in pairs(ranges) do
@@ -694,7 +748,7 @@ local function render_buf(bufnr)
     local extmark_ids = place_image_extmarks(id, range)
     local str = range_to_string(range, bufnr)
     vim.schedule(function()
-      compile_image(bufnr, id, range, str, extmark_ids, false)
+      compile_image(bufnr, id, range, str, extmark_ids, prelude_count, false)
     end)
   end
   hide_extmarks_at_cursor()
@@ -821,15 +875,17 @@ local function render_live_typst_preview()
   local new_preview = {}
   new_preview.image_id = new_image_id(bufnr)
   new_preview.extmark_id = place_image_extmarks(new_preview.image_id, range, prev_extmark, true)[1]
-  compile_image(bufnr, new_preview.image_id, range, str, {}, true)
+  -- TODO: determine prelude_count somehow?
+  compile_image(bufnr, new_preview.image_id, range, str, {}, 0, true)
   preview_image = new_preview
 end
 
 --- @class typstconfig
 --- @field allow_missing_typst? boolean Allow the plugin to load without the typst binary in the path
 --- @field do_diagnostics? boolean Should typst-concealer provide diagnostics on error?
---- @field color? string What color should typst-concealer render text/stroke with? (defaults to your color scheme's Normal color)
---- @field enabled_by_default boolean Should typst-concealer conceal newly opened buffers by default?
+--- @field color? string What color should typst-concealer render text/stroke with? (only applies when styling_type is "colorscheme")
+--- @field enabled_by_default? boolean Should typst-concealer conceal newly opened buffers by default?
+--- @field styling_type? "none" | "simple" | "colorscheme" What kind of styling should typst-concealer apply to your typst?
 
 local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
 
@@ -843,6 +899,10 @@ M.disable_buf = function(bufnr)
   render_buf(bufnr)
 end
 
+M.rerender_buf = function(bufnr)
+  render_buf(bufnr)
+end
+
 --- Initializes typst-concealer
 --- @param cfg typstconfig
 --- @see typstconfig
@@ -850,11 +910,19 @@ function M.setup(cfg)
   local config = {
     allow_missing_typst = default(cfg.allow_missing_typst, false),
     do_diagnostics = default(cfg.do_diagnostics, true),
-    enabled_by_default = default(cfg.enabled_by_default, true)
+    enabled_by_default = default(cfg.enabled_by_default, true),
+    styling_type = default(cfg.styling_type, "colorscheme"),
+    --- @type string | nil
+    color = cfg.color
   }
 
-  setup_prelude(cfg.color)
+  if not vim.list_contains({ "none", "simple", "colorscheme" }, config.styling_type) then
+    error("typst styling_type" ..
+      config.styling_type .. "is not a valid option. Please use 'none', 'simple' or 'colorscheme'")
+  end
+
   M.config = config
+  setup_prelude()
 
   if not config.allow_missing_typst and vim.fn.executable('typst') ~= 1 then
     error("Typst executable not found in path, typst-concealer will not work")
@@ -946,7 +1014,6 @@ function M.setup(cfg)
         desc = "typst-concealer update colour scheme",
         callback = function()
           setup_prelude()
-          -- TODO: check current render status
           render_buf(vim.fn.bufnr())
         end
       })
