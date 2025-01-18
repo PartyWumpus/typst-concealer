@@ -32,7 +32,7 @@ end)
 ```
 
 ## Features
-- Live previews when in insert mode (WIP)
+- Live previews when in insert mode (WIP, currently only works for single line previews)
 - Supports top level set/let/import
 - Renders code blocks
 - Renders math blocks
@@ -45,16 +45,12 @@ The `styling_type` option is probably the most important one. It has three modes
 - "simple": Just remove the padding and get the width/height to fit of things to fit properly. Will have a white background, looking a little out of place in dark themes, but may be acceptable.
 - "none": Do nothing, and completely rely on the user provided `#set`s. This is best for documents that never intend to be actually rendered as pdf/html, but just in neovim, otherwise the output of either neovim or the pdf is going to look rather strange.
 
-In the future I may provide two options, one for inline typst, and one for multiline.
 These styles are applied *after* all other rules are applied.
 
 ## Known issues / Todo list
-- It doesn't actually hide the text beneath multiline images properly, so sometimes it's visible (if >75 chars)
-- Mulitline typst things are just rendered at a fixed length of 75 characters, which is perhaps a little silly
-- Multiline typst is not unhidden as a group, or given a preview
-- When typst is unhidden, it doesn't rerender after an edit
+- When typst is unhidden, it doesn't rerender after an edit, which is doable
 - Assumes a mutable /tmp folder
 - Breaks sometimes, pls report if any errors happen
-- The rules about positioning of multiline/inline are totally different from what typst actually does
+- The rules about positioning of multiline/inline are totally different from what typst actually does (when doing inline stuff, do it like this: `$ 2+2=4 $`, not `$2+2=4$`, or the plugin will render it weird. This is the complete opposite of what typst normally does, will be fixed eventually)
 
 
