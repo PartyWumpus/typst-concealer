@@ -38,7 +38,6 @@ local function setup_prelude()
         '#set polygon(stroke: ' .. color .. ')\n' ..
         '#set rect(stroke: ' .. color .. ')\n' ..
         '#set square(stroke: ' .. color .. ')\n' ..
-        '#set box(stroke: ' .. color .. ')\n' ..
         ''
   elseif M.config.styling_type == "simple" then
     M._styling_prelude = '' ..
@@ -493,7 +492,7 @@ local function render_buf(bufnr)
         prev_range = { start_row, start_col, end_row, end_col }
       end
 
-      if (vim.list_contains({ "let", "set", "import" }, code_flavour)) then
+      if (vim.list_contains({ "let", "set", "import", "show" }, code_flavour)) then
         runtime_preludes[#runtime_preludes + 1] = range_to_string({ start_row, start_col, end_row, end_col }, bufnr) ..
             "\n"
       end
