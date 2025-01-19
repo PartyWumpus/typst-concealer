@@ -207,15 +207,28 @@ local function conceal_for_image_id(bufnr, image_id, width)
 
   if #extmark_ids == 1 then
     local line = ""
-    for j = 0, width - 1 do
-      line = line .. kitty_codes.placeholder .. kitty_codes.diacritics[1] .. kitty_codes.diacritics[j + 1]
+    if width >= #(kitty_codes.diacritics) then
+      line = "This image attempted to render wider than " ..
+          #(kitty_codes.diacritics) .. " characters long. This is likely a bug."
+    else
+      for j = 0, width - 1 do
+        line = line .. kitty_codes.placeholder .. kitty_codes.diacritics[1] .. kitty_codes.diacritics[j + 1]
+      end
     end
     update_extmark_text(bufnr, extmark_ids[1], { line, hl_group })
   else
-    for i, extmark_id in ipairs(extmark_ids) do
+    for i, extmark_id in pairs(extmark_ids) do
       local line = ""
-      for j = 0, width - 1 do
-        line = line .. kitty_codes.placeholder .. kitty_codes.diacritics[i] .. kitty_codes.diacritics[j + 1]
+      if width >= #(kitty_codes.diacritics) then
+        line = "This image attempted to render wider than " ..
+            #(kitty_codes.diacritics) .. " characters long. This is likely a bug."
+      elseif i >= #(kitty_codes.diacritics) then
+        line = "This image attempted to render taller than " ..
+            #(kitty_codes.diacritics) .. " lines. If you legitimately see this in a real document, open an issue."
+      else
+        for j = 0, width - 1 do
+          line = line .. kitty_codes.placeholder .. kitty_codes.diacritics[i] .. kitty_codes.diacritics[j + 1]
+        end
       end
       update_extmark_text(bufnr, extmark_id, { line, hl_group })
     end
