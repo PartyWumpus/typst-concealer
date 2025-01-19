@@ -65,7 +65,7 @@ local function default(val, default_val)
   return val
 end
 
-local ns_id = vim.api.nvim_create_namespace("typst")
+local ns_id = vim.api.nvim_create_namespace("typst-concealer")
 
 --- Escapes a given escape sequence so tmux will pass it through
 --- @param message string
@@ -701,7 +701,7 @@ end
 --- @field styling_type? "none" | "simple" | "colorscheme" What kind of styling should typst-concealer apply to your typst?
 --- @field ppi? integer What PPI should typst render at. Default is 300, typst's normal default is 144.
 
-local augroup = vim.api.nvim_create_augroup("typst", { clear = true })
+local augroup = vim.api.nvim_create_augroup("typst-concealer", { clear = true })
 
 M.enable_buf = function(bufnr)
   M._enabled_buffers[bufnr] = true
@@ -774,7 +774,7 @@ function M.setup(cfg)
     {
       pattern = "*.typ",
       group = augroup,
-      desc = "typst-concealer render file on enter",
+      desc = "render file on enter",
       callback = function()
         render_buf()
       end
@@ -784,7 +784,7 @@ function M.setup(cfg)
     {
       pattern = "*.typ",
       group = augroup,
-      desc = "typst-concealer enable file on creation",
+      desc = "enable file on creation if the option is set",
       --- @param ev autocmd_event
       callback = function(ev)
         if M.config.enabled_by_default then
@@ -797,7 +797,7 @@ function M.setup(cfg)
     {
       pattern = "*.typ",
       group = augroup,
-      desc = "typst-concealer render file on enter",
+      desc = "render file on write",
       callback = function()
         vim.schedule(function()
           render_buf()
@@ -805,32 +805,65 @@ function M.setup(cfg)
       end
     })
 
-  vim.api.nvim_create_autocmd({ "CursorMovedI", "CursorMoved", "ModeChanged" },
+  vim.api.nvim_create_autocmd({ "CursorMovedI", "CursorMoved" },
     {
       pattern = "*.typ",
       group = augroup,
-      desc = "typst-concealer unconceal on line hover",
+      desc = "unconceal on line hover",
       callback = function()
         hide_extmarks_at_cursor()
       end
     })
 
-  vim.api.nvim_create_autocmd({ "CursorMoved", "ModeChanged" },
+  vim.api.nvim_create_autocmd({ "ModeChanged" },
     {
-      pattern = "*.typ",
       group = augroup,
-      desc = "typst-concealer remove preview when not in insert mode",
+      pattern = "v:*",
+      desc = "unconceal when exiting visual mode, as this changes cursor pos without CursorMoved event",
       --- @param ev autocmd_event
       callback = function(ev)
-        clear_live_typst_preview(ev.buf)
+        local str = vim.api.nvim_buf_get_name(ev.buf)
+        local match = str:match(".*%.typ$")
+        if match ~= nil then
+          hide_extmarks_at_cursor()
+        end
       end
     })
+
+  vim.api.nvim_create_autocmd({ "ModeChanged" },
+    {
+      group = augroup,
+      pattern = "i:*",
+      desc = "remove preview when exiting insert mode",
+      --- @param ev autocmd_event
+      callback = function(ev)
+        local str = vim.api.nvim_buf_get_name(ev.buf)
+        local match = str:match(".*%.typ$")
+        if match ~= nil then
+          clear_live_typst_preview(ev.buf)
+        end
+      end
+    })
+
+  vim.api.nvim_create_autocmd("ModeChanged", {
+    group = augroup,
+    desc = "render live preview on insert enter",
+    pattern = "*:i",
+    --- @param ev autocmd_event
+    callback = function(ev)
+      local str = vim.api.nvim_buf_get_name(ev.buf)
+      local match = str:match(".*%.typ$")
+      if match ~= nil then
+        render_live_typst_preview()
+      end
+    end
+  })
 
   vim.api.nvim_create_autocmd("CursorMovedI",
     {
       pattern = "*.typ",
       group = augroup,
-      desc = "typst-concealer render live preview",
+      desc = "render live preview on cursor move",
       callback = function()
         render_live_typst_preview()
       end
@@ -840,7 +873,7 @@ function M.setup(cfg)
     vim.api.nvim_create_autocmd("ColorScheme",
       {
         group = augroup,
-        desc = "typst-concealer update colour scheme",
+        desc = "update colour scheme",
         callback = function()
           setup_prelude()
           render_buf(vim.fn.bufnr())
