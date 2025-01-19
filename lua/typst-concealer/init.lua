@@ -433,7 +433,21 @@ local function new_image_id(bufnr)
   return 1
 end
 
-local code_query = vim.treesitter.query.parse("typst", "[(code (_) @type) (math)] @code")
+
+--- @class typst_ts_match
+--- @field [1]? {[1]: TSNode} call_ident
+--- @field [2]? {[1]: TSNode} code
+--- @field [3] {[1]: TSNode} block
+
+local typst_query = vim.treesitter.query.parse("typst", [[
+[
+ (code
+  [(_) (call item: (ident) @call_ident)] @code
+ )
+ (math)
+] @block
+]]
+)
 
 local function reset_buf(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
@@ -473,9 +487,10 @@ local function render_buf(bufnr)
   local ranges = {}
   local prev_range = nil
 
-  for _, match, _ in code_query:iter_matches(tree, bufnr) do
-    local type = match[2]:type()
-    local start_row, start_col, end_row, end_col = match[2]:range()
+  for _, match, _ in typst_query:iter_matches(tree, bufnr, nil, nil, { all = true }) do
+    --- @cast match typst_ts_match
+    local block_type = match[3][1]:type()
+    local start_row, start_col, end_row, end_col = match[3][1]:range()
 
     -- If the previous range contains this one, skip it
     -- This check should maybe have to interate through all the previous (and future) ranges
@@ -484,28 +499,34 @@ local function render_buf(bufnr)
       goto continue
     end
 
-    if (type == "math") then
+    if (block_type == "math") then
       local image_id = new_image_id(bufnr)
       remaining_images = remaining_images + 1
       ranges[image_id] = { { start_row, start_col, end_row, end_col }, #runtime_preludes }
       prev_range = { start_row, start_col, end_row, end_col }
-    elseif (type == "code") then
-      local code_flavour = match[1]:type()
-      -- TODO: Consider special-casing "call", to deal with:
+    elseif (block_type == "code") then
+      local code_type = match[2][1]:type()
+      local call_ident = ""
+      if match[1] ~= nil then
+        local a, b, c, d = match[1][1]:range()
+        call_ident = range_to_string({ a, b, c, d }, bufnr)
+      end
+      -- TODO: Consider special-casing other function calls, to deal with:
       -- #image, for larger images
       -- #link, for working links
       -- #highlight, for looking not terrible
       -- probably more too
       -- Special casing would not be useful for trying to render something as closely to how typst would
       -- but instead would be useful for those (me) using typst-concealer as the end goal
-      if (not vim.list_contains({ "let", "set", "import", "show" }, code_flavour)) then
+      -- Would def be toggleable though
+      if (not vim.list_contains({ "let", "set", "import", "show" }, code_type)) and (not vim.list_contains({ "pagebreak" }, call_ident)) then
         local image_id = new_image_id(bufnr)
         remaining_images = remaining_images + 1
         ranges[image_id] = { { start_row, start_col, end_row, end_col }, #runtime_preludes }
         prev_range = { start_row, start_col, end_row, end_col }
       end
 
-      if (vim.list_contains({ "let", "set", "import", "show" }, code_flavour)) then
+      if (vim.list_contains({ "let", "set", "import", "show" }, code_type)) then
         runtime_preludes[#runtime_preludes + 1] = range_to_string({ start_row, start_col, end_row, end_col }, bufnr) ..
             "\n"
       end
