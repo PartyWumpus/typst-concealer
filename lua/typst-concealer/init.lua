@@ -13,6 +13,11 @@ local kitty_codes = require('typst-concealer.kitty-codes')
 --- @field file string
 --- @field data any
 
+--- @class typst_ts_match
+--- @field [1]? {[1]: TSNode} call_ident
+--- @field [2]? {[1]: TSNode} code
+--- @field [3] {[1]: TSNode} block
+
 --- @type { [integer]: boolean }
 M._enabled_buffers = {}
 
@@ -436,22 +441,6 @@ local function new_image_id(bufnr)
   return 1
 end
 
-
---- @class typst_ts_match
---- @field [1]? {[1]: TSNode} call_ident
---- @field [2]? {[1]: TSNode} code
---- @field [3] {[1]: TSNode} block
-
-local typst_query = vim.treesitter.query.parse("typst", [[
-[
- (code
-  [(_) (call item: (ident) @call_ident)] @code
- )
- (math)
-] @block
-]]
-)
-
 local function reset_buf(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
   Live_preview_extmark_id = nil
@@ -490,7 +479,7 @@ local function render_buf(bufnr)
   local ranges = {}
   local prev_range = nil
 
-  for _, match, _ in typst_query:iter_matches(tree, bufnr, nil, nil, { all = true }) do
+  for _, match, _ in M._typst_query:iter_matches(tree, bufnr, nil, nil, { all = true }) do
     --- @cast match typst_ts_match
     local block_type = match[3][1]:type()
     local start_row, start_col, end_row, end_col = match[3][1]:range()
@@ -644,7 +633,7 @@ function hide_extmarks_at_cursor()
 end
 
 local function get_math_block_at_cursor()
-  local parser = vim.treesitter.get_parser(0)
+  local parser = vim.treesitter.get_parser(0, "typst")
   local tree = parser:parse()[1]:root()
   local cursor_pos = vim.api.nvim_win_get_cursor(0)
   cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] }
@@ -753,6 +742,20 @@ function M.setup(cfg)
   if not config.allow_missing_typst and vim.fn.executable('typst') ~= 1 then
     error("Typst executable not found in path, typst-concealer will not work")
   end
+
+  local typst_parser_installed = pcall(vim.treesitter.get_parser, 0, "typst")
+  if typst_parser_installed == false then
+    error("Typst treesitter parser not found, typst-concealer will not work")
+  end
+
+  M._typst_query = vim.treesitter.query.parse("typst", [[
+[
+ (code
+  [(_) (call item: (ident) @call_ident)] @code
+ )
+ (math)
+] @block
+]])
 
   if vim.v.vim_did_enter then
     local bufnr = vim.fn.bufnr()
