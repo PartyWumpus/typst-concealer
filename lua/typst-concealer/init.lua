@@ -357,6 +357,9 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
         local data = pngData(path)
         -- Assumes a character has a 1/2 aspect ratio that needs accounting for
         local width = math.ceil((data.width / data.height) * 2) * height
+        if width >= #(kitty_codes.diacritics) then
+          width = #(kitty_codes.diacritics) - 1
+        end
 
         create_image(path, image_id, width, height)
         conceal_for_image_id(bufnr, image_id, width)
