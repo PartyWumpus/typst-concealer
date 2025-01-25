@@ -721,6 +721,11 @@ end
 --- @param cfg typstconfig
 --- @see typstconfig
 function M.setup(cfg)
+  local version = vim.version()
+  if version.major == 0 and version.minor < 10 then
+    error("Typst concealer requires at least nvim 10.0 to work")
+  end
+
   local config = {
     allow_missing_typst = default(cfg.allow_missing_typst, false),
     do_diagnostics = default(cfg.do_diagnostics, true),

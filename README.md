@@ -3,7 +3,9 @@
 A neovim plugin that uses the new(ish) kitty unicode rendering protocol to render typst expressions inline.
 Has live previews as you type in insert mode.
 
-Is experimental. Also it should work with tmux :)
+Requires nvim >=10.0, and only works properly in ghostty and kitty.
+
+Works in tmux (partially, it will break if two instances of the plugin work as they will replace each-other's images), will not work in zellij as they have no way of passing through the escape sequences kitty needs to display images.
 
 https://github.com/user-attachments/assets/94179603-2f41-43ff-9e5f-6dc4f31dc02d
 
