@@ -1,6 +1,8 @@
 --- @class typstconcealer
 local M = {}
 
+vim.uv = vim.uv or vim.loop
+
 local pngData = require('typst-concealer.png-lua')
 local kitty_codes = require('typst-concealer.kitty-codes')
 
