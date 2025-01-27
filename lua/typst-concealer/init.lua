@@ -405,7 +405,7 @@ local function compile_image(bufnr, image_id, orignal_range, str, extmark_ids, p
   local stdout = vim.uv.new_pipe()
   local stderr = vim.uv.new_pipe()
 
-  local handle = vim.uv.spawn("typst", {
+  local handle = vim.uv.spawn(M.config.typst_location, {
     stdio = { stdin, stdout, stderr },
     args = { "compile", "-", path, "--ppi=" .. M.config.ppi },
   }, function(code, signal)
@@ -694,7 +694,7 @@ local function render_live_typst_preview()
 end
 
 --- @class typstconfig
---- @field allow_missing_typst? boolean Allow the plugin to load without the typst binary in the path
+--- @field typst_location? string Where should typst-concealer look for your typst binary? Defaults to your PATH, likely does not need setting.
 --- @field do_diagnostics? boolean Should typst-concealer provide diagnostics on error?
 --- @field color? string What color should typst-concealer render text/stroke with? (only applies when styling_type is "colorscheme")
 --- @field enabled_by_default? boolean Should typst-concealer conceal newly opened buffers by default?
@@ -727,7 +727,7 @@ function M.setup(cfg)
   end
 
   local config = {
-    allow_missing_typst = default(cfg.allow_missing_typst, false),
+    typst_location = default(cfg.typst_location, 'typst'),
     do_diagnostics = default(cfg.do_diagnostics, true),
     enabled_by_default = default(cfg.enabled_by_default, true),
     styling_type = default(cfg.styling_type, "colorscheme"),
@@ -744,8 +744,12 @@ function M.setup(cfg)
   M.config = config
   setup_prelude()
 
-  if not config.allow_missing_typst and vim.fn.executable('typst') ~= 1 then
-    error("Typst executable not found in path, typst-concealer will not work")
+  if not config.allow_missing_typst and vim.fn.executable(M.config.typst_location) ~= 1 then
+    if M.config.typst_location == "typst" then
+      error("Typst executable not found in path, typst-concealer will not work")
+    else
+      error("Typst executable not found at '" .. M.config.typst_location .. "', typst-concealer will not work")
+    end
   end
 
   local typst_parser_installed = pcall(vim.treesitter.get_parser, 0, "typst")
