@@ -703,17 +703,46 @@ end
 
 local augroup = vim.api.nvim_create_augroup("typst-concealer", { clear = true })
 
+--- Enable concealing for the given buffer
+--- @param bufnr integer | nil
 M.enable_buf = function(bufnr)
+  if bufnr == nil then
+    bufnr = vim.fn.bufnr()
+  end
   M._enabled_buffers[bufnr] = true
   render_buf(bufnr)
 end
 
+--- Enable concealing for the given buffer
+--- @param bufnr integer | nil
 M.disable_buf = function(bufnr)
+  if bufnr == nil then
+    bufnr = vim.fn.bufnr()
+  end
   M._enabled_buffers[bufnr] = nil
   render_buf(bufnr)
 end
 
+--- Toggle concealing for the given buffer
+--- @param bufnr integer | nil
+M.toggle_buf = function(bufnr)
+  if bufnr == nil then
+    bufnr = vim.fn.bufnr()
+  end
+  if M._enabled_buffers[bufnr] ~= nil then
+    M._enabled_buffers[bufnr] = nil
+  else
+    M._enabled_buffers[bufnr] = true
+  end
+  render_buf(bufnr)
+end
+
+--- Re-render the conceals for the given buffer
+--- @param bufnr integer | nil
 M.rerender_buf = function(bufnr)
+  if bufnr == nil then
+    bufnr = vim.fn.bufnr()
+  end
   render_buf(bufnr)
 end
 
