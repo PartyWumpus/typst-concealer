@@ -3,6 +3,11 @@ local M = {}
 
 local pngData = require('typst-concealer.png-lua')
 local kitty_codes = require('typst-concealer.kitty-codes')
+local truecolor = vim.env.COLORTERM == "truecolor" or vim.env.COLORTERM == "24bit"
+-- Just hope there aren't collisions...
+-- This is a poor solution
+-- FIXME: use some sort of incrementing counter somehow
+local pid = vim.fn.getpid() % 256
 
 --- @class autocmd_event
 --- @field id integer
@@ -424,21 +429,26 @@ local function compile_image(bufnr, image_id, orignal_range, str, extmark_ids, p
   stdout:close()
 end
 
+-- FIXME: this is bad. terrible even. fix it.
 image_ids_in_use = {}
 ---@param bufnr integer
 ---@return integer
 local function new_image_id(bufnr)
-  -- TODO: support ids > 255
-  for i = 5, 250 do
+  for i = pid, 2 ^ 16 + pid - 1 do
     if image_ids_in_use[i] == nil then
       image_ids_in_use[i] = bufnr
       return i
     end
   end
+
   -- Image id table full, overflow it
-  print("[typst-concealer] too many image ids in use, overflowing")
-  image_ids_in_use = { true }
-  return 1
+  print([[
+[typst-concealer] >65536 image ids in use, overflowing. This is probably a bug, you're looking at a very long document or a lot of documents.
+Open an issue if you see this, the cap can be increased if someone actually needs it.
+]])
+  image_ids_in_use = {}
+  -- as stated above, this is bad, i do not like it.
+  return new_image_id(bufnr)
 end
 
 local function reset_buf(bufnr)
