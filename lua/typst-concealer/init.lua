@@ -72,6 +72,9 @@ local function default(val, default_val)
 end
 
 local ns_id = vim.api.nvim_create_namespace("typst-concealer")
+-- used for each line of a multiline image
+-- please tell me if you know of a better way of overlaying mulitline text
+local ns_id2 = vim.api.nvim_create_namespace("typst-concealer-2")
 
 --- Escapes a given escape sequence so tmux will pass it through
 --- @param message string
@@ -648,23 +651,23 @@ function hide_extmarks_at_cursor()
   Currently_hidden_extmark_ids = new_hidden
 end
 
-local function get_math_block_at_cursor()
+local function get_typst_block_at_cursor()
   local parser = vim.treesitter.get_parser(0, "typst")
   local tree = parser:parse()[1]:root()
   local cursor_pos = vim.api.nvim_win_get_cursor(0)
-  cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] }
+  cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] - 1 }
   local element = tree:named_descendant_for_range(cursor_pos[1], cursor_pos[2], cursor_pos[3], cursor_pos[4])
+  local outermost_block = nil
   while true do
     if element == nil then
-      return nil
-    elseif element:type() ~= "math" then
-      element = element:parent()
-    else
       break
+    elseif element:type() == "math" or element:type() == "code" then
+      outermost_block = element
     end
+    element = element:parent()
   end
-  if element ~= nil then
-    return element:range()
+  if outermost_block ~= nil then
+    return outermost_block:range()
   end
 
   return nil
@@ -685,7 +688,7 @@ end
 
 local function render_live_typst_preview()
   local bufnr = vim.fn.bufnr()
-  local start_row, start_col, end_row, end_col = get_math_block_at_cursor()
+  local start_row, start_col, end_row, end_col = get_typst_block_at_cursor()
   if start_row == nil then
     clear_live_typst_preview(bufnr)
     return
