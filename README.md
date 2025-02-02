@@ -50,11 +50,13 @@ The `styling_type` option is probably the most important one. It has three modes
 
 These styles are applied *after* all other rules are applied.
 
-## Known issues / Todo list
-- When typst is unhidden, it doesn't rerender after an edit, which is doable
+## Known issues
 - Assumes a mutable /tmp folder
 - Breaks sometimes, pls report if any errors happen
 - The rules about positioning of multiline/inline are totally different from what typst actually does (when doing inline stuff, do it like this: `$ 2+2=4 $`, not `$2+2=4$`, or the plugin will render it weird. This is the complete opposite of what typst normally does, will be fixed eventually)
 - If a file is closed while stuff is rendering, the plugin will freak out.
 - If you are typing at the same time an image appears, you can get a bug where the message sent to the kitty image protocol gets displayed on the screen. It's difficult to reproduce, and I have no idea what to do about this.
 
+## TODO
+- [ ] Multiline live previews
+- [ ] Automatically re-render a 'static' conceal when it is edited in insert mode

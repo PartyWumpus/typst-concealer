@@ -104,36 +104,37 @@ end
 
 -- Thanks https://github.com/3rd/image.nvim/issues/259 for showing how to do this with a code example!
 
---- @type { [integer]: integer[] }
-local mark_groups = {}
---- @type { [integer]: integer[] }
-local image_id_to_extmarks = {}
+--- @type { [integer]: integer[] | nil }
+--- Goes from a text-less multiline ns_id mark to a list of one line ns_id2 marks for concealing
+local multiline_marks = {}
+--- @type { [integer]: integer }
+local image_id_to_extmark = {}
 
 --- Places the unicode characters to render a given image id over a range
 --- @param image_id integer
 --- @param range Range4
 --- @param extmark_id? integer|nil
---- @param below? boolean should the text be virt_text or virt_lines
---- @return { [integer]: integer } array of extmark IDs that correspond to this image
-local function place_image_extmarks(image_id, range, extmark_id, below)
+--- @param concealing? boolean should the text be concealing or non-concealing
+--- @return integer
+local function place_image_extmark(image_id, range, extmark_id, concealing)
   -- TODO: take bufnr
   local start_row, start_col, end_row, end_col = range[1], range[2], range[3], range[4]
   local height = range_to_height(range)
-  --- @type { [integer]: integer }
-  local extmark_ids = {}
+  --- @type integer
+  local new_extmark_id = nil
 
   if height == 1 then
-    if below then
-      extmark_ids = { vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+    if concealing == false then
+      new_extmark_id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
         id = extmark_id,
         virt_lines = { { { "" } } },
         virt_text_pos = "overlay",
         invalidate = true,
         end_col = end_col,
         end_row = end_row
-      }) }
+      })
     else
-      extmark_ids = { vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+      new_extmark_id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
         id = extmark_id,
         virt_text = { { "" } },
         virt_text_pos = "inline",
@@ -141,63 +142,77 @@ local function place_image_extmarks(image_id, range, extmark_id, below)
         invalidate = true,
         end_col = end_col,
         end_row = end_row
-      }) }
+      })
     end
   else
-    local lines = vim.api.nvim_buf_get_lines(0, start_row, end_row + 1, false)
-    for i = 0, height - 1 do
-      local id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row + i, start_col, {
-        virt_text = { { "" } },
-        virt_text_pos = "overlay",
-        conceal = "",
-        invalidate = true,
-        end_col = #lines[i + 1],
-        end_row = start_row + i
-      })
-      table.insert(extmark_ids, id)
-    end
-    for _, id in pairs(extmark_ids) do
-      mark_groups[id] = extmark_ids
-    end
+    new_extmark_id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+      id = extmark_id,
+      invalidate = true,
+      end_col = end_col,
+      end_row = end_row
+    })
+
+    -- the extmarks will be added later
+    multiline_marks[new_extmark_id] = {}
   end
 
-  image_id_to_extmarks[image_id] = extmark_ids
-  return extmark_ids
+  image_id_to_extmark[image_id] = new_extmark_id
+  return new_extmark_id
 end
 
 --- Updates the text for an existing extmark
 --- @param bufnr integer
 --- @param extmark_id integer
 --- @param string any
-local function update_extmark_text(bufnr, extmark_id, string)
-  if Currently_hidden_extmark_ids[extmark_id] ~= nil then
-    Currently_hidden_extmark_ids[extmark_id] = { string }
+--- @param skip_hide_check? boolean | nil
+local function update_extmark_text(bufnr, extmark_id, string, skip_hide_check)
+  if (skip_hide_check ~= true) and Currently_hidden_extmark_ids[extmark_id] ~= nil then
+    Currently_hidden_extmark_ids[extmark_id] = string
     return
   end
   local m = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, extmark_id, { details = true })
-  --- @type integer, integer, vim.api.keyset.extmark_details
-  local row, col, opts = m[1], m[2], m[3]
-  if row == nil or col == nil or opts == nil then
+  if #m == 0 then
     -- The extmark is missing.
     -- This just means it was deleted at some point between creation and the image finishing rendering, which is bound to happen sometimes.
     -- This is okay, it just means we can't actually display text, not a catastrophic failure so we just fail quietly.
     return
   end
-  if opts.virt_text_pos == "inline" or mark_groups[extmark_id] ~= nil then
+  --- @type integer, integer, vim.api.keyset.extmark_details
+  local row, col, opts = m[1], m[2], m[3]
+
+  local height = range_to_height({ row, col, opts.end_row, opts.end_col })
+  if height ~= 1 then
+    for _, id in pairs(multiline_marks[extmark_id]) do
+      vim.api.nvim_buf_del_extmark(bufnr, ns_id2, id)
+    end
+    multiline_marks[extmark_id] = {}
+    for i = 1, height do
+      local lines = vim.api.nvim_buf_get_lines(0, row, opts.end_row + 1, false)
+      -- ns_id2!
+      local new_id = vim.api.nvim_buf_set_extmark(0, ns_id2, row + i - 1, col, {
+        virt_text = string[i],
+        virt_text_pos = "overlay",
+        conceal = "",
+        end_col = #lines[i],
+        end_row = row + i - 1
+      })
+      table.insert(multiline_marks[extmark_id], new_id)
+    end
+  elseif opts.virt_text_pos == "inline" then
     vim.api.nvim_buf_set_extmark(0, ns_id, row, col, {
       id = extmark_id,
-      virt_text = { string },
+      virt_text = string,
       virt_text_pos = opts.virt_text_pos,
       invalidate = opts.invalidate,
       end_col = opts.end_col,
       end_row = opts.end_row,
       --- @diagnostic disable-next-line nvim type is wrong
-      conceal = opts.conceal
+      conceal = "",
     })
   else
     vim.api.nvim_buf_set_extmark(0, ns_id, row, col, {
       id = extmark_id,
-      virt_lines = { { string } },
+      virt_lines = { string },
       virt_text_pos = opts.virt_text_pos,
       invalidate = opts.invalidate,
       end_col = opts.end_col,
@@ -212,14 +227,16 @@ end
 --- @param bufnr integer
 --- @param image_id integer
 --- @param width integer
-local function conceal_for_image_id(bufnr, image_id, width)
-  local extmark_ids = image_id_to_extmarks[image_id]
+--- @param height integer
+local function conceal_for_image_id(bufnr, image_id, width, height)
+  local extmark_id = image_id_to_extmark[image_id]
+  local multiline_extmark_ids = multiline_marks[extmark_id]
 
   local hl_group = "typst-concealer-image-id-" .. tostring(image_id)
   -- encode image_id into the foreground color
   vim.api.nvim_set_hl(0, hl_group, { fg = string.format("#%06X", image_id) })
 
-  if #extmark_ids == 1 then
+  if multiline_extmark_ids == nil then
     local line = ""
     if width >= #(kitty_codes.diacritics) then
       line = "This image attempted to render wider than " ..
@@ -229,9 +246,10 @@ local function conceal_for_image_id(bufnr, image_id, width)
         line = line .. kitty_codes.placeholder .. kitty_codes.diacritics[1] .. kitty_codes.diacritics[j + 1]
       end
     end
-    update_extmark_text(bufnr, extmark_ids[1], { line, hl_group })
+    update_extmark_text(bufnr, extmark_id, { { line, hl_group } })
   else
-    for i, extmark_id in pairs(extmark_ids) do
+    local lines = {}
+    for i = 1, height do
       local line = ""
       if width >= #(kitty_codes.diacritics) then
         line = "This image attempted to render wider than " ..
@@ -244,8 +262,9 @@ local function conceal_for_image_id(bufnr, image_id, width)
           line = line .. kitty_codes.placeholder .. kitty_codes.diacritics[i] .. kitty_codes.diacritics[j + 1]
         end
       end
-      update_extmark_text(bufnr, extmark_id, { line, hl_group })
+      lines[#lines + 1] = { { line, hl_group } }
     end
+    update_extmark_text(bufnr, extmark_id, lines)
   end
 end
 
@@ -318,9 +337,9 @@ local remaining_images = 0
 --- @param original_range Range4 This range may be out of date by this point, but it is good enough for diagnostics
 --- @param image_id integer
 --- @param bufnr integer
---- @param extmark_ids { [integer]: integer }
+--- @param extmark_id integer
 --- @param is_live_preview boolean
-local function on_typst_exit(status_code, stderr, original_range, image_id, bufnr, extmark_ids, is_live_preview)
+local function on_typst_exit(status_code, stderr, original_range, image_id, bufnr, extmark_id, is_live_preview)
   stderr:shutdown()
   local err_bucket = {}
   stderr:read_start(function(err, data)
@@ -359,8 +378,12 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
         source = "typst-concealer"
       }
       vim.schedule(function()
-        for _, id in ipairs(extmark_ids) do
-          vim.api.nvim_buf_del_extmark(bufnr, ns_id, id)
+        vim.api.nvim_buf_del_extmark(bufnr, ns_id, extmark_id)
+        local ids = multiline_marks[extmark_id]
+        if ids then
+          for _, id in ipairs(ids) do
+            vim.api.nvim_buf_del_extmark(bufnr, ns_id2, id)
+          end
         end
       end)
     else
@@ -375,7 +398,7 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
         end
 
         create_image(path, image_id, width, height)
-        conceal_for_image_id(bufnr, image_id, width)
+        conceal_for_image_id(bufnr, image_id, width, height)
       end)
     end
     if (M.config.do_diagnostics) then
@@ -402,10 +425,10 @@ end
 --- @param image_id integer
 --- @param orignal_range Range4 range which is safe to use for diagnostics only
 --- @param str string typst text to render
---- @param extmark_ids { [integer]: integer }
+--- @param extmark_id integer
 --- @param prelude_count integer how far into the list of runtime_preludes should we add to the string
 --- @param is_live_preview boolean
-local function compile_image(bufnr, image_id, orignal_range, str, extmark_ids, prelude_count, is_live_preview)
+local function compile_image(bufnr, image_id, orignal_range, str, extmark_id, prelude_count, is_live_preview)
   -- TODO: use stdout maybe?
   local path = typst_file_path(image_id, bufnr)
 
@@ -417,7 +440,7 @@ local function compile_image(bufnr, image_id, orignal_range, str, extmark_ids, p
     stdio = { stdin, stdout, stderr },
     args = { "compile", "-", path, "--ppi=" .. M.config.ppi },
   }, function(code, signal)
-    on_typst_exit(code, stderr, orignal_range, image_id, bufnr, extmark_ids, is_live_preview)
+    on_typst_exit(code, stderr, orignal_range, image_id, bufnr, extmark_id, is_live_preview)
   end)
 
   -- TODO: is this really the best way of doing this?
@@ -456,9 +479,10 @@ end
 
 local function reset_buf(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, ns_id, 0, -1)
+  vim.api.nvim_buf_clear_namespace(bufnr, ns_id2, 0, -1)
   Live_preview_extmark_id = nil
   Currently_hidden_extmark_ids = {}
-  mark_groups = {}
+  multiline_marks = {}
   diagnostics = {}
   runtime_preludes = {}
 
@@ -535,19 +559,16 @@ local function render_buf(bufnr)
         runtime_preludes[#runtime_preludes + 1] = range_to_string({ start_row, start_col, end_row, end_col }, bufnr) ..
             "\n"
       end
-
-      -- We ignore all "show" expressions, consider not doing this.
-      -- This is because templates will likely completely break the render? Unsure.
     end
     ::continue::
   end
 
   for id, image in pairs(ranges) do
     local range, prelude_count = image[1], image[2]
-    local extmark_ids = place_image_extmarks(id, range)
+    local extmark_id = place_image_extmark(id, range)
     local str = range_to_string(range, bufnr)
     vim.schedule(function()
-      compile_image(bufnr, id, range, str, extmark_ids, prelude_count, false)
+      compile_image(bufnr, id, range, str, extmark_id, prelude_count, false)
     end)
   end
   hide_extmarks_at_cursor()
@@ -564,24 +585,8 @@ Currently_hidden_extmark_ids = {}
 ---@param col integer
 ---@param opts vim.api.keyset.extmark_details
 ---@param new_hidden table
-local function hide_extmark(bufnr, id, row, col, opts, new_hidden)
-  if Currently_hidden_extmark_ids[id] ~= nil then
-    new_hidden[id] = Currently_hidden_extmark_ids[id]
-    Currently_hidden_extmark_ids[id] = nil
-  else
-    new_hidden[id] = opts.virt_text
-    Currently_hidden_extmark_ids[id] = nil
-    vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
-      id = id,
-      virt_text = { { "" } },
-
-      end_row = opts.end_row,
-      end_col = opts.end_col,
-      conceal = nil,
-      virt_text_pos = opts.virt_text_pos,
-      invalidate = opts.invalidate,
-    })
-  end
+---@param namespace_id integer
+local function hide_extmark(bufnr, id, row, col, opts, new_hidden, namespace_id)
 end
 
 function hide_extmarks_at_cursor()
@@ -611,41 +616,51 @@ function hide_extmarks_at_cursor()
 
     for _, extmark in ipairs(extmarks) do
       local id = extmark[1]
-      if mark_groups[id] ~= nil then
-        for _, new_id in ipairs(mark_groups[id]) do
-          if new_hidden[new_id] ~= nil then
-            goto continue
+      if multiline_marks[id] ~= nil then
+        if new_hidden[id] ~= nil then
+
+        elseif Currently_hidden_extmark_ids[id] ~= nil then
+          new_hidden[id] = Currently_hidden_extmark_ids[id]
+          Currently_hidden_extmark_ids[id] = nil
+        else
+          local text = {}
+          for _, new_id in ipairs(multiline_marks[id]) do
+            local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id2, new_id, { details = true })
+            --- @type vim.api.keyset.extmark_details
+            local opts = new_mark[3]
+            text[#text + 1] = opts.virt_text
+            vim.api.nvim_buf_del_extmark(bufnr, ns_id2, new_id)
           end
-          local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, new_id, { details = true })
-          --- @type integer, integer, vim.api.keyset.extmark_details
-          local row, col, opts = new_mark[1], new_mark[2], new_mark[3]
-          hide_extmark(bufnr, new_id, row, col, opts, new_hidden)
-          ::continue::
+          new_hidden[id] = text
+          Currently_hidden_extmark_ids[id] = nil
         end
       else
         --- @type integer, integer, integer, vim.api.keyset.extmark_details
         local id, row, col, opts = extmark[1], extmark[2], extmark[3], extmark[4]
-        hide_extmark(bufnr, id, row, col, opts, new_hidden)
+        if Currently_hidden_extmark_ids[id] ~= nil then
+          new_hidden[id] = Currently_hidden_extmark_ids[id]
+          Currently_hidden_extmark_ids[id] = nil
+        else
+          new_hidden[id] = opts.virt_text
+          Currently_hidden_extmark_ids[id] = nil
+          vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
+            id = id,
+            virt_text = { { "" } },
+
+            end_row = opts.end_row,
+            end_col = opts.end_col,
+            conceal = nil,
+            virt_text_pos = opts.virt_text_pos,
+            invalidate = opts.invalidate,
+          })
+        end
       end
     end
   end
 
   -- show remaining extmarks not in selected lines
   for id, text in pairs(Currently_hidden_extmark_ids) do
-    local m = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, id, { details = true })
-    if #m ~= 0 then
-      local row, col, opts = m[1], m[2], m[3]
-      vim.api.nvim_buf_set_extmark(bufnr, ns_id, row, col, {
-        id = id,
-        virt_text = text,
-
-        end_row = opts.end_row,
-        end_col = opts.end_col,
-        conceal = "",
-        virt_text_pos = opts.virt_text_pos,
-        invalidate = opts.invalidate,
-      })
-    end
+    update_extmark_text(bufnr, id, text, true)
   end
 
   Currently_hidden_extmark_ids = new_hidden
@@ -706,9 +721,9 @@ local function render_live_typst_preview()
   end
   local new_preview = {}
   new_preview.image_id = new_image_id(bufnr)
-  new_preview.extmark_id = place_image_extmarks(new_preview.image_id, range, prev_extmark, true)[1]
+  new_preview.extmark_id = place_image_extmark(new_preview.image_id, range, prev_extmark, false)
   -- TODO: determine prelude_count somehow?
-  compile_image(bufnr, new_preview.image_id, range, str, {}, 0, true)
+  compile_image(bufnr, new_preview.image_id, range, str, new_preview.extmark_id, 0, true)
   preview_image = new_preview
 end
 
