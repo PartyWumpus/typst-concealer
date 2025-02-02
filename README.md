@@ -39,6 +39,7 @@ end)
 - Renders code blocks
 - Renders math blocks
 - Can automatically match your nvim colorscheme
+- Can provide diagnostics (although they can be disabled if you want to just use tinymist's superior diagnostics)
 
 ## Options
 The options are mostly explained in the types, so either take a look in the code, (look for the `typstconfig` type) or get a good lua LSP and take a look what your autocomplete tells you.

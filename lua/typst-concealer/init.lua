@@ -8,6 +8,7 @@ local truecolor = vim.env.COLORTERM == "truecolor" or vim.env.COLORTERM == "24bi
 -- This is a poor solution
 -- FIXME: use some sort of incrementing counter somehow
 local pid = vim.fn.getpid() % 256
+local full_pid = vim.fn.getpid()
 
 --- @class autocmd_event
 --- @field id integer
@@ -295,13 +296,12 @@ local function clear_image(image_id)
 end
 
 
-local pid = vim.fn.getpid()
 --- Generates a filename for a given image id and buffer
 --- @param id integer
 --- @param bufnr integer
 --- @return string
 local function typst_file_path(id, bufnr)
-  return "/tmp/tty-graphics-protocol-typst-concealer-" .. pid .. "-" .. bufnr .. "-" .. id .. ".png"
+  return "/tmp/tty-graphics-protocol-typst-concealer-" .. full_pid .. "-" .. bufnr .. "-" .. id .. ".png"
 end
 
 --- @type vim.Diagnostic[]
@@ -583,41 +583,47 @@ end
 
 function hide_extmarks_at_cursor()
   local bufnr = vim.fn.bufnr()
-  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1
-  local range_line = vim.fn.getpos('v')[2] - 1
-  local extmarks
-  if range_line > cursor_line then
-    extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, { cursor_line, 0 }, { range_line, -1 }, {
-      overlap = true,
-      details = true
-    })
-  else
-    extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, { range_line, 0, }, { cursor_line, -1 }, {
-      overlap = true,
-      details = true
-    })
-  end
 
   --- @type {[integer]: virt_text}
   local new_hidden = {}
 
-  for _, extmark in ipairs(extmarks) do
-    local id = extmark[1]
-    if mark_groups[id] ~= nil then
-      for _, new_id in ipairs(mark_groups[id]) do
-        if new_hidden[new_id] ~= nil then
-          goto continue
-        end
-        local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, new_id, { details = true })
-        --- @type integer, integer, vim.api.keyset.extmark_details
-        local row, col, opts = new_mark[1], new_mark[2], new_mark[3]
-        hide_extmark(bufnr, new_id, row, col, opts, new_hidden)
-        ::continue::
-      end
+  local mode = vim.api.nvim_get_mode().mode
+  -- If we are not concealing in this mode, then don't do any hiding of extmarks
+  if not (M.config.conceal_in_normal and mode:find('n', 1, true) ~= nil) then
+    local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1
+    local range_line = vim.fn.getpos('v')[2] - 1
+
+    local extmarks
+    if range_line > cursor_line then
+      extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, { cursor_line, 0 }, { range_line, -1 }, {
+        overlap = true,
+        details = true
+      })
     else
-      --- @type integer, integer, vim.api.keyset.extmark_details
-      local id, row, col, opts = extmark[1], extmark[2], extmark[3], extmark[4]
-      hide_extmark(bufnr, id, row, col, opts, new_hidden)
+      extmarks = vim.api.nvim_buf_get_extmarks(bufnr, ns_id, { range_line, 0, }, { cursor_line, -1 }, {
+        overlap = true,
+        details = true
+      })
+    end
+
+    for _, extmark in ipairs(extmarks) do
+      local id = extmark[1]
+      if mark_groups[id] ~= nil then
+        for _, new_id in ipairs(mark_groups[id]) do
+          if new_hidden[new_id] ~= nil then
+            goto continue
+          end
+          local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id, new_id, { details = true })
+          --- @type integer, integer, vim.api.keyset.extmark_details
+          local row, col, opts = new_mark[1], new_mark[2], new_mark[3]
+          hide_extmark(bufnr, new_id, row, col, opts, new_hidden)
+          ::continue::
+        end
+      else
+        --- @type integer, integer, integer, vim.api.keyset.extmark_details
+        local id, row, col, opts = extmark[1], extmark[2], extmark[3], extmark[4]
+        hide_extmark(bufnr, id, row, col, opts, new_hidden)
+      end
     end
   end
 
@@ -703,6 +709,8 @@ local function render_live_typst_preview()
   preview_image = new_preview
 end
 
+--- @alias concealcursor_modes '' | 'n' | 'v' | 'nv' | 'i' | 'ni' | 'vi' | 'nvi' | 'c' | 'nc' | 'vc' | 'nvc' | 'ic' | 'nic' | 'vic' | 'nvic'
+
 --- @class typstconfig
 --- @field typst_location? string Where should typst-concealer look for your typst binary? Defaults to your PATH, likely does not need setting.
 --- @field do_diagnostics? boolean Should typst-concealer provide diagnostics on error?
@@ -710,6 +718,7 @@ end
 --- @field enabled_by_default? boolean Should typst-concealer conceal newly opened buffers by default?
 --- @field styling_type? "none" | "simple" | "colorscheme" What kind of styling should typst-concealer apply to your typst?
 --- @field ppi? integer What PPI should typst render at. Default is 300, typst's normal default is 144.
+--- @field conceal_in_normal boolean Should typst-concealer still conceal when the normal mode cursor goes over a line.
 
 local augroup = vim.api.nvim_create_augroup("typst-concealer", { clear = true })
 
@@ -765,6 +774,11 @@ function M.setup(cfg)
     error("Typst concealer requires at least nvim 10.0 to work")
   end
 
+  if M._setup_ran ~= nil then
+    error("typst-concealer's setup function may only be run once")
+  end
+  M._setup_ran = true
+
   local config = {
     typst_location = default(cfg.typst_location, 'typst'),
     do_diagnostics = default(cfg.do_diagnostics, true),
@@ -772,7 +786,8 @@ function M.setup(cfg)
     styling_type = default(cfg.styling_type, "colorscheme"),
     ppi = default(cfg.ppi, 300),
     --- @type string | nil
-    color = cfg.color
+    color = cfg.color,
+    conceal_in_normal = default(cfg.conceal_in_normal, false),
   }
 
   if not vim.list_contains({ "none", "simple", "colorscheme" }, config.styling_type) then
@@ -805,15 +820,22 @@ function M.setup(cfg)
 ] @block
 ]])
 
+  local function init_buf(bufnr)
+    vim.opt_local.conceallevel = 2
+    vim.opt_local.concealcursor = "nv"
+
+    if M.config.enabled_by_default then
+      M._enabled_buffers[bufnr] = true
+    end
+  end
+
+
   if vim.v.vim_did_enter then
     local bufnr = vim.fn.bufnr()
     local str = vim.api.nvim_buf_get_name(bufnr)
     local match = str:match(".*%.typ$")
     if match ~= nil then
-      if M.config.enabled_by_default then
-        M._enabled_buffers[bufnr] = true
-        render_buf(bufnr)
-      end
+      init_buf(bufnr)
     end
   end
 
@@ -835,9 +857,7 @@ function M.setup(cfg)
       desc = "enable file on creation if the option is set",
       --- @param ev autocmd_event
       callback = function(ev)
-        if M.config.enabled_by_default then
-          M._enabled_buffers[ev.buf] = true
-        end
+        init_buf(ev.buf)
       end
     })
 
@@ -929,9 +949,12 @@ function M.setup(cfg)
       })
   end
 
-  -- TODO: determine better way of doing this
-  vim.opt.conceallevel = 2
-  --vim.opt.concealcursor = "nv"
+  vim.api.nvim_create_autocmd("FileType", {
+    pattern = "typst",
+    callback = function(ev)
+      init_buf(ev.buf)
+    end
+  })
 end
 
 return M
