@@ -38,7 +38,7 @@ local function setup_prelude()
     end
     -- FIXME: lists everything. agony. hope https://github.com/typst/typst/issues/3356 is resolved.
     M._styling_prelude = '' ..
-        '#set page(width: auto, height: auto, margin: 0pt, fill: none)\n' ..
+        '#set page(width: auto, height: auto, margin: (x: 0pt, y: 0pt), fill: none)\n' ..
         '#set text(' .. color .. ', top-edge: "ascender", bottom-edge: "descender")\n' ..
         '#set line(stroke: ' .. color .. ')\n' ..
         '#set table(stroke: ' .. color .. ')\n' ..
@@ -145,12 +145,29 @@ local function place_image_extmark(image_id, range, extmark_id, concealing)
       })
     end
   else
-    new_extmark_id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
-      id = extmark_id,
-      invalidate = true,
-      end_col = end_col,
-      end_row = end_row
-    })
+    if concealing == false then
+      new_extmark_id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+        id = extmark_id,
+        invalidate = true,
+        virt_text = { { "" } },
+        -- this is used for determining the virt_text_pos of the child ns_id2 extmarks
+        -- this extmark will never actually have text
+        virt_text_pos = "right_align",
+        end_col = end_col,
+        end_row = end_row
+      })
+    else
+      new_extmark_id = vim.api.nvim_buf_set_extmark(0, ns_id, start_row, start_col, {
+        id = extmark_id,
+        invalidate = true,
+        virt_text = { { "" } },
+        -- this is used for determining the virt_text_pos of the child ns_id2 extmarks
+        -- this extmark will never actually have text
+        virt_text_pos = "overlay",
+        end_col = end_col,
+        end_row = end_row
+      })
+    end
 
     -- the extmarks will be added later
     multiline_marks[new_extmark_id] = {}
@@ -182,17 +199,23 @@ local function update_extmark_text(bufnr, extmark_id, string, skip_hide_check)
 
   local height = range_to_height({ row, col, opts.end_row, opts.end_col })
   if height ~= 1 then
-    for _, id in pairs(multiline_marks[extmark_id]) do
-      vim.api.nvim_buf_del_extmark(bufnr, ns_id2, id)
+    if multiline_marks[extmark_id] then
+      for _, id in pairs(multiline_marks[extmark_id]) do
+        vim.api.nvim_buf_del_extmark(bufnr, ns_id2, id)
+      end
     end
     multiline_marks[extmark_id] = {}
     for i = 1, height do
       local lines = vim.api.nvim_buf_get_lines(0, row, opts.end_row + 1, false)
       -- ns_id2!
-      local new_id = vim.api.nvim_buf_set_extmark(0, ns_id2, row + i - 1, col, {
+      local conceal = nil
+      if opts.virt_text_pos ~= "right_align" then
+        conceal = ""
+      end
+      local new_id = vim.api.nvim_buf_set_extmark(0, ns_id2, row + i - 1, 0, {
         virt_text = string[i],
-        virt_text_pos = "overlay",
-        conceal = "",
+        conceal = conceal,
+        virt_text_pos = opts.virt_text_pos,
         end_col = #lines[i],
         end_row = row + i - 1
       })
@@ -390,7 +413,15 @@ local function on_typst_exit(status_code, stderr, original_range, image_id, bufn
       local path = typst_file_path(image_id, bufnr)
       vim.schedule(function()
         local height = range_to_height(original_range)
-        local data = pngData(path)
+        local success, data = pcall(pngData, path)
+        if success == false then
+          -- the image file doesn't exist (or is invalid in some way)
+          -- this is likely just the tempfile being deleted by kitty
+          -- because we've already deleted this image before it was rendered
+          -- this is okay.
+          return
+        end
+
         -- Assumes a character has a 1/2 aspect ratio that needs accounting for
         local width = math.ceil((data.width / data.height) * 2) * height
         if width >= #(kitty_codes.diacritics) then
@@ -623,11 +654,15 @@ function hide_extmarks_at_cursor()
           new_hidden[id] = Currently_hidden_extmark_ids[id]
           Currently_hidden_extmark_ids[id] = nil
         else
+          if extmark[4].virt_text_pos == "right_align" then
+            goto continue
+          end
           local text = {}
           for _, new_id in ipairs(multiline_marks[id]) do
             local new_mark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns_id2, new_id, { details = true })
             --- @type vim.api.keyset.extmark_details
             local opts = new_mark[3]
+
             text[#text + 1] = opts.virt_text
             vim.api.nvim_buf_del_extmark(bufnr, ns_id2, new_id)
           end
@@ -655,6 +690,7 @@ function hide_extmarks_at_cursor()
           })
         end
       end
+      ::continue::
     end
   end
 
@@ -670,14 +706,20 @@ local function get_typst_block_at_cursor()
   local parser = vim.treesitter.get_parser(0, "typst")
   local tree = parser:parse()[1]:root()
   local cursor_pos = vim.api.nvim_win_get_cursor(0)
-  cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] - 1 }
+  cursor_pos = { cursor_pos[1] - 1, cursor_pos[2] }
   local element = tree:named_descendant_for_range(cursor_pos[1], cursor_pos[2], cursor_pos[3], cursor_pos[4])
   local outermost_block = nil
   while true do
     if element == nil then
       break
-    elseif element:type() == "math" or element:type() == "code" then
+    end
+
+    local type = element:type()
+    if type == "math" or type == "code" then
       outermost_block = element
+    elseif type == "ERROR" then
+      -- if code block is contained within any sort of syntax error, just don't
+      return nil
     end
     element = element:parent()
   end
@@ -697,6 +739,13 @@ local function clear_live_typst_preview(bufnr)
   if preview_image ~= nil then
     clear_image(preview_image.image_id)
     vim.api.nvim_buf_del_extmark(bufnr, ns_id, preview_image.extmark_id)
+    if multiline_marks[preview_image.extmark_id] ~= nil then
+      for _, id in pairs(multiline_marks[preview_image.extmark_id]) do
+        vim.api.nvim_buf_del_extmark(bufnr, ns_id2, id)
+      end
+      multiline_marks[preview_image.extmark_id] = nil
+    end
+
     preview_image = nil
   end
 end
@@ -708,16 +757,18 @@ local function render_live_typst_preview()
     clear_live_typst_preview(bufnr)
     return
   end
-  if start_row ~= end_row then
-    -- TODO:
-    return
-  end
   local range = { start_row, start_col, end_row, end_col }
   local str = range_to_string(range, bufnr)
   local prev_extmark = nil
   if preview_image ~= nil then
     clear_image(preview_image.image_id)
     prev_extmark = preview_image.extmark_id
+    if multiline_marks[prev_extmark] ~= nil then
+      for _, id in pairs(multiline_marks[prev_extmark]) do
+        vim.api.nvim_buf_del_extmark(bufnr, ns_id2, id)
+      end
+      multiline_marks[prev_extmark] = nil
+    end
   end
   local new_preview = {}
   new_preview.image_id = new_image_id(bufnr)
@@ -951,7 +1002,9 @@ function M.setup(cfg)
       group = augroup,
       desc = "render live preview on cursor move",
       callback = function()
-        render_live_typst_preview()
+        vim.schedule(function()
+          render_live_typst_preview()
+        end)
       end
     })
 

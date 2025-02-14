@@ -34,7 +34,7 @@ end)
 ```
 
 ## Features
-- Live previews when in insert mode (WIP, currently only works for single line previews)
+- Live previews when in insert mode (WIP: does not support top level set/let/import)
 - Supports top level set/let/import
 - Renders code blocks
 - Renders math blocks
@@ -55,8 +55,11 @@ These styles are applied *after* all other rules are applied.
 - Breaks sometimes, pls report if any errors happen
 - The rules about positioning of multiline/inline are totally different from what typst actually does (when doing inline stuff, do it like this: `$ 2+2=4 $`, not `$2+2=4$`, or the plugin will render it weird. This is the complete opposite of what typst normally does, will be fixed eventually)
 - If a file is closed while stuff is rendering, the plugin will freak out.
-- If you are typing at the same time an image appears, you can get a bug where the message sent to the kitty image protocol gets displayed on the screen. It's difficult to reproduce, and I have no idea what to do about this.
+- Sometimes the message sent to the kitty image protocol gets displayed on the screen as colourful garbage text. It's difficult to reproduce, and I have no idea what to do about this.
 
 ## TODO
-- [ ] Multiline live previews
+- [ ] Support top level set/let/import when in live insert mode previews
 - [ ] Automatically re-render a 'static' conceal when it is edited in insert mode
+- [ ] Proper cleanup to get rid of dangling image ids
+- [ ] Investigate weird rendering bug with transparency
+- [ ] Write some better documentation. Investigate what the best way of doing it is.
