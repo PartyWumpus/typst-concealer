@@ -45,7 +45,7 @@ local function setup_prelude()
         '#set circle(stroke: ' .. color .. ')\n' ..
         '#set ellipse(stroke: ' .. color .. ')\n' ..
         '#set line(stroke: ' .. color .. ')\n' ..
-        '#set path(stroke: ' .. color .. ')\n' ..
+        '#set curve(stroke: ' .. color .. ')\n' ..
         '#set polygon(stroke: ' .. color .. ')\n' ..
         '#set rect(stroke: ' .. color .. ')\n' ..
         '#set square(stroke: ' .. color .. ')\n' ..
